@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Truck Cycle Data Pipeline - Business Logic Flow</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2196F3 0%, #21CBF3 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .flow-container {
+            padding: 40px;
+            background: #f8f9fa;
+        }
+        
+        .flow-section {
+            margin-bottom: 40px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .section-header {
+            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+            color: white;
+            padding: 20px;
+            font-size: 1.3em;
+            font-weight: bold;
+        }
+        
+        .section-content {
+            padding: 25px;
+        }
+        
+        .flow-step {
+            display: flex;
+            align-items: center;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+        
+        .flow-step:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .step-ingestion { background: linear-gradient(135deg, #e3f2fd, #bbdefb); }
+        .step-processing { background: linear-gradient(135deg, #fff3e0, #ffcc02); }
+        .step-decision { background: linear-gradient(135deg, #fce4ec, #f8bbd9); }
+        .step-storage { background: linear-gradient(135deg, #e8f5e8, #c8e6c9); }
+        .step-error { background: linear-gradient(135deg, #ffebee, #ffcdd2); }
+        .step-comparison { background: linear-gradient(135deg, #f3e5f5, #e1bee7); }
+        
+        .step-number {
+            background: #2196F3;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 20px;
+            flex-shrink: 0;
+        }
+        
+        .step-content {
+            flex: 1;
+        }
+        
+        .step-title {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 5px;
+            color: #333;
+        }
+        
+        .step-description {
+            color: #666;
+            font-size: 0.95em;
+            line-height: 1.4;
+        }
+        
+        .arrow {
+            text-align: center;
+            font-size: 2em;
+            color: #2196F3;
+            margin: 10px 0;
+        }
+        
+        .segments-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .segment-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.1);
+            border-left: 5px solid;
+        }
+        
+        .segment-load-time { border-color: #4CAF50; }
+        .segment-load-travel { border-color: #FF9800; }
+        .segment-dump-time { border-color: #2196F3; }
+        .segment-empty-travel { border-color: #9C27B0; }
+        
+        .segment-title {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        .conditions-list {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        
+        .conditions-list ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        
+        .conditions-list li {
+            margin: 8px 0;
+            color: #555;
+        }
+        
+        .database-schema {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+        
+        .highlight {
+            background: #fff3cd;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #856404;
+            font-weight: bold;
+        }
+        
+        .state-transitions {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 30px 0;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+        
+        .state-box {
+            background: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.1);
+            text-align: center;
+            min-width: 120px;
+        }
+        
+        .transition-arrow {
+            font-size: 1.5em;
+            color: #2196F3;
+            font-weight: bold;
+        }
+        
+        .comparison-flow {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: 1fr 50px 1fr;
+            gap: 20px;
+            align-items: center;
+            margin: 20px 0;
+        }
+        
+        .record-box {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .vs-text {
+            text-align: center;
+            font-weight: bold;
+            color: #2196F3;
+            font-size: 1.2em;
+        }
+        
+        .warning-box {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        
+        .warning-title {
+            font-weight: bold;
+            color: #856404;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Real-Time Truck Cycle Data Pipeline</h1>
+            <p>Business Logic Flow - Simple GPS Data Processing & Cycle Tracking</p>
+        </div>
+        
+        <div class="flow-container">
+            <!-- Data Ingestion Section -->
+            <div class="flow-section">
+                <div class="section-header">1. Data Ingestion & Reference Data Loading</div>
+                <div class="section-content">
+                    <div class="flow-step step-ingestion">
+                        <div class="step-number">1</div>
+                        <div class="step-content">
+                            <div class="step-title">GPS Data Point from Kinesis</div>
+                            <div class="step-description">Single GPS data point containing: asset_guid, timestamp (UTC+0), longitude, latitude, speed, <strong>site_guid</strong></div>
+                        </div>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-ingestion">
+                        <div class="step-number">2</div>
+                        <div class="step-content">
+                            <div class="step-title">Data Consumption (amazon-kclpy 3.0.1)</div>
+                            <div class="step-description">Consume single GPS record from Kinesis Data Stream</div>
+                        </div>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-processing">
+                        <div class="step-number">3</div>
+                        <div class="step-content">
+                            <div class="step-title">Load Site-Specific Reference Data</div>
+                            <div class="step-description">📊 <strong>PostgreSQL:</strong> Query asset table for loaders WHERE site_guid = {GPS.site_guid}<br>
+                            ⚡ <strong>Redis:</strong> Get dump regions for dump_regions:{GPS.site_guid}</div>
+                        </div>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-processing">
+                        <div class="step-number">4</div>
+                        <div class="step-content">
+                            <div class="step-title">✅ Process GPS Data</div>
+                            <div class="step-description">
+                                <strong>Parse Data:</strong> Extract asset_guid, timestamp, lat, lon, speed, site_guid<br>
+                                <strong>Check Asset:</strong> Verify asset exists in asset table<br>
+                                <strong>Continue Processing:</strong> Use GPS data for cycle logic
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-storage">
+                        <div class="step-number">5</div>
+                        <div class="step-content">
+                            <div class="step-title">🔄 Store GPS Data Point</div>
+                            <div class="step-description"><strong>Every GPS data point is stored in asset_cycle_vlx table</strong> with initial segment classification and INPROGRESS status</div>
+                        </div>
+                    </div>
+                    
+                    <div class="warning-box">
+                        <div class="warning-title">Data Sources with Site Filtering:</div>
+                        <strong>Kinesis GPS data:</strong> Includes site_guid for filtering reference data<br>
+                        <strong>PostgreSQL asset table:</strong> Loader units filtered by site_guid from GPS data<br>
+                        <strong>Redis:</strong> Dump regions filtered by site_guid from GPS data<br>
+                        <strong>PostgreSQL asset_cycle_vlx:</strong> GPS data points with site-specific reference information
+                    </div>
+                </div>
+            </div>
+
+            <!-- Historical Data Check -->
+            <div class="flow-section">
+                <div class="section-header">2. Historical Data Check & Initial Processing</div>
+                <div class="section-content">
+                    <div class="flow-step step-decision">
+                        <div class="step-number">6</div>
+                        <div class="step-content">
+                            <div class="step-title">Check Historical Data for Asset</div>
+                            <div class="step-description">Query asset_cycle_vlx table for ANY previous records (COMPLETE, INPROGRESS, or OUTLIER) for this cycle_truck_asset_guid</div>
+                        </div>
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Historical Data Decision Logic:</strong>
+                        <ul>
+                            <li><strong>No Historical Data:</strong> First time seeing this asset → Apply initial data classification</li>
+                            <li><strong>INPROGRESS Record:</strong> Compare with current GPS point for segment transitions</li>
+                            <li><strong>COMPLETE/OUTLIER Record:</strong> Start new cycle based on current location</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-comparison">
+                        <div class="step-number">7</div>
+                        <div class="step-content">
+                            <div class="step-title">Initial Data Classification (No Historical Records)</div>
+                            <div class="step-description">🆕 For first-time assets: Check distance to loaders & containment in dump regions<br>
+                            ❓ If neither condition met → Insert with current_segment = NULL</div>
+                        </div>
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Initial Classification Rules:</strong>
+                        <ul>
+                            <li><strong>Within 50m of loader:</strong> current_segment = 'LOAD_TIME', start new cycle</li>
+                            <li><strong>Within dump region:</strong> current_segment = 'DUMP_TIME', start new cycle</li>
+                            <li><strong>Neither condition:</strong> current_segment = NULL, wait for next GPS point</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Location Analysis -->
+            <div class="flow-section">
+                <div class="section-header">3. Location Analysis & Segment Classification</div>
+                <div class="section-content">
+                    <div class="flow-step step-comparison">
+                        <div class="step-number">8</div>
+                        <div class="step-content">
+                            <div class="step-title">🔍 Check ALL Reference Locations</div>
+                            <div class="step-description"><strong>Critical Rule:</strong> For every GPS point, check against ALL loaders AND ALL dump regions<br>
+                            🚫 <strong>Never assume:</strong> Which dump region or loader based on history<br>
+                            ✅ <strong>Always verify:</strong> Current GPS position against complete reference data</div>
+                        </div>
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Location Checking (Every GPS Point):</strong>
+                        <ul>
+                            <li><strong>ALL Dump Regions:</strong> Check if GPS point is within ANY dump region polygon</li>
+                            <li><strong>ALL Loaders:</strong> Calculate distance to ALL loaders, find nearest within 50m</li>
+                            <li><strong>No Assumptions:</strong> Don't assume destination based on previous cycles</li>
+                            <li><strong>Real-time Decision:</strong> Truck could go anywhere based on operational needs</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="segments-grid">
+                        <div class="segment-card segment-load-time">
+                            <div class="segment-title">🟢 Load Time</div>
+                            <p><strong>Condition:</strong> Distance ≤ 50m from nearest loader unit (from asset table)</p>
+                            <p><strong>DB Update:</strong> Set load_start_utc if transitioning from Empty Travel</p>
+                        </div>
+                        
+                        <div class="segment-card segment-load-travel">
+                            <div class="segment-title">🟡 Load Travel</div>
+                            <p><strong>Condition:</strong> Distance > 50m from all loader units</p>
+                            <p><strong>DB Update:</strong> Set load_end_utc and calculate load_duration</p>
+                        </div>
+                        
+                        <div class="segment-card segment-dump-time">
+                            <div class="segment-title">🔵 Dump Time</div>
+                            <p><strong>Condition:</strong> Within any dump region polygon (from Redis)</p>
+                            <p><strong>DB Update:</strong> Set dump_start_utc when entering, record region_guid</p>
+                        </div>
+                        
+                        <div class="segment-card segment-empty-travel">
+                            <div class="segment-title">🟣 Empty Travel</div>
+                            <p><strong>Condition:</strong> Exited the specific dump region (previously in Dump Time)</p>
+                            <p><strong>Verification:</strong> Previously in specific dump region, now Point.within() = False for that region</p>
+                            <p><strong>DB Update:</strong> Set dump_end_utc and calculate dump_duration</p>
+                        </div>
+                        
+                        <div class="segment-card" style="border-color: #9E9E9E; background: #F5F5F5;">
+                            <div class="segment-title">❓ NULL Segment</div>
+                            <p><strong>Condition:</strong> First-time asset NOT near loader AND NOT in dump region</p>
+                            <p><strong>Purpose:</strong> Placeholder until asset moves to determinable location</p>
+                            <p><strong>DB Update:</strong> current_segment = NULL, wait for next GPS point</p>
+                        </div>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-comparison">
+                        <div class="step-number">9</div>
+                        <div class="step-content">
+                            <div class="step-title">🔄 Basic Segment Transition Logic</div>
+                            <div class="step-description">For assets with historical data:<br>
+                            <strong>Fixed Business Rules:</strong> 50m loader proximity, 8-hour cycle timeout<br>
+                            <strong>No Assumptions:</strong> Always check ALL loaders and dump regions<br>
+                            <strong>Simple Processing:</strong> Apply same rules to all sites</div>
+                        </div>
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Fixed Business Parameters:</strong>
+                        <ul>
+                            <li><strong>Loader Proximity:</strong> 50 meters (fixed for all sites)</li>
+                            <li><strong>Cycle Timeout:</strong> 8 hours (mark as incomplete)</li>
+                            <li><strong>No Complex Logic:</strong> Simple, consistent rules</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loader & Dump Region Selection Algorithms -->
+            <div class="flow-section">
+                <div class="section-header">3.5. Loader & Dump Region Selection Algorithms</div>
+                <div class="section-content">
+                    <div class="comparison-flow">
+                        <h4>🏗️ Nearest Loader Selection Algorithm:</h4>
+                        <div class="database-schema" style="background: #e3f2fd; padding: 15px;">
+def find_nearest_loader(truck_lat, truck_lon, site_guid, all_loaders_for_site):
+    """
+    Find nearest loader within 50m for specific site
+    all_loaders_for_site: Pre-filtered by site_guid from GPS data
+    """
+    nearest_loader = None
+    min_distance = float('inf')
+    
+    for loader in all_loaders_for_site:  # Already filtered by site_guid
+        distance = haversine_distance(
+            truck_lat, truck_lon, 
+            loader.latitude, loader.longitude
+        )
+        
+        if distance <= 50 and distance < min_distance:
+            min_distance = distance
+            nearest_loader = loader
+    
+    return nearest_loader, min_distance
+                        </div>
+                        
+                        <h4 style="margin-top: 25px;">🏔️ Active Dump Region Detection Algorithm:</h4>
+                        <div class="database-schema" style="background: #fff3e0; padding: 15px;">
+def find_active_dump_region(truck_lat, truck_lon, site_guid, all_dump_regions_for_site):
+    """
+    Find active dump region for specific site
+    all_dump_regions_for_site: Pre-filtered by site_guid from GPS data
+    """
+    active_region = None
+    truck_point = Point(truck_lon, truck_lat)  # Note: lon, lat for Shapely
+    
+    for region in all_dump_regions_for_site:  # Already filtered by site_guid
+        # Create polygon from 4 corner coordinates
+        polygon = Polygon(region.region_location)
+        
+        if truck_point.within(polygon):
+            active_region = region
+            break  # First match (regions shouldn't overlap)
+    
+    return active_region
+                        </div>
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Selection Rules:</strong>
+                        <ul>
+                            <li><strong>Loader Selection:</strong> Must be within 50m radius AND closest among all loaders in site</li>
+                            <li><strong>Dump Region:</strong> Truck GPS point must be within polygon boundaries (Point.within())</li>
+                            <li><strong>Multiple Matches:</strong> For dump regions, use first match (regions should not overlap)</li>
+                            <li><strong>No Matches:</strong> If no loader within 50m → Load Travel or Empty Travel segment</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cycle Completion Detection -->
+            <div class="flow-section">
+                <div class="section-header">4. Cycle Completion, Outlier Detection & Update</div>
+                <div class="section-content">
+                    <div class="flow-step step-decision">
+                        <div class="step-number">10</div>
+                        <div class="step-content">
+                            <div class="step-title">Detect Complete Cycle or Outlier</div>
+                            <div class="step-description">🔍 <strong>Normal Completion:</strong> Empty Travel → Load Time<br>
+                            ⚠️ <strong>Outlier Detection:</strong> Load Travel → Load Time (skipping Dump Time & Empty Travel)</div>
+                        </div>
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Cycle Completion vs Outlier Criteria:</strong>
+                        <ul>
+                            <li><strong>COMPLETE Cycle:</strong> Previous = Empty Travel, Current = Load Time (full sequence completed)</li>
+                            <li><strong>OUTLIER Cycle:</strong> Previous = Load Travel, Current = Load Time (dumped outside dump regions)</li>
+                            <li><strong>INPROGRESS:</strong> Any other segment transition</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-storage">
+                        <div class="step-number">11</div>
+                        <div class="step-content">
+                            <div class="step-title">Update asset_cycle_vlx Record Status</div>
+                            <div class="step-description">🟢 <strong>COMPLETE:</strong> Calculate all durations, mark as COMPLETE<br>
+                            🟡 <strong>OUTLIER:</strong> Set dump fields to NULL, mark as OUTLIER</div>
+                        </div>
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Status-Specific Updates:</strong>
+                        <ul>
+                            <li><strong>COMPLETE:</strong> All durations calculated, dump region recorded</li>
+                            <li><strong>OUTLIER:</strong> dump_start_utc = NULL, dump_end_utc = NULL, dump_duration = NULL, empty_travel_duration = NULL, active_dump_region_* = NULL</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="arrow">↓</div>
+                    
+                    <div class="flow-step step-storage">
+                        <div class="step-number">12</div>
+                        <div class="step-content">
+                            <div class="step-title">Create New INPROGRESS Record</div>
+                            <div class="step-description">Insert new record in asset_cycle_vlx for current GPS point with incremented cycle_number and INPROGRESS status</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- State Transitions -->
+            <div class="flow-section">
+                <div class="section-header">5. Segment State Transitions</div>
+                <div class="section-content">
+                    <div class="state-transitions">
+                        <div class="state-box" style="background: #c8e6c9;">Load Time</div>
+                        <div class="transition-arrow">→</div>
+                        <div class="state-box" style="background: #fff3e0;">Load Travel</div>
+                        <div class="transition-arrow">→</div>
+                        <div class="state-box" style="background: #e3f2fd;">Dump Time</div>
+                        <div class="transition-arrow">→</div>
+                        <div class="state-box" style="background: #f3e5f5;">Empty Travel</div>
+                        <div class="transition-arrow">→</div>
+                        <div class="state-box" style="background: #c8e6c9; font-weight: bold;">COMPLETE!</div>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 20px 0; font-weight: bold; color: #ff9800;">
+                        🔄 OUTLIER PATH: Load Travel → Load Time (skipping Dump Time & Empty Travel)
+                    </div>
+                    
+                    <div class="state-transitions">
+                        <div class="state-box" style="background: #c8e6c9;">Load Time</div>
+                        <div class="transition-arrow">→</div>
+                        <div class="state-box" style="background: #fff3e0;">Load Travel</div>
+                        <div class="transition-arrow" style="color: #ff9800;">⤴️</div>
+                        <div class="state-box" style="background: #ffcc02; font-weight: bold; color: #333;">OUTLIER!</div>
+                        <div class="transition-arrow">→</div>
+                        <div class="state-box" style="background: #c8e6c9;">Load Time<br/>(New Cycle)</div>
+                    </div>
+                    
+                    <div class="warning-box">
+                        <div class="warning-title">Important Cycle Logic:</div>
+                        <strong>Normal Cycles:</strong> Follow complete sequence Load Time → Load Travel → Dump Time → Empty Travel → Load Time<br>
+                        <strong>Outlier Cycles:</strong> Skip dump regions (Load Travel → Load Time) indicating dumps outside designated areas<br>
+                        <strong>Database Impact:</strong> Outlier cycles have NULL dump-related fields for analysis and reporting
+                    </div>
+                </div>
+            </div>
+
+            <!-- Database Schema -->
+            <div class="flow-section">
+                <div class="section-header">6. Database Schema & Reference Tables</div>
+                <div class="section-content">
+                    <div class="database-schema">
+-- Main tracking table
+CREATE TABLE asset_cycle_vlx (
+    id SERIAL PRIMARY KEY,
+    cycle_truck_asset_guid VARCHAR(255) NOT NULL,
+    cycle_number INTEGER NOT NULL,
+    cycle_status VARCHAR(20) NOT NULL, -- 'COMPLETE', 'INPROGRESS', or 'OUTLIER'
+    site_guid VARCHAR(255) NOT NULL,
+    
+    -- Current GPS data point information
+    current_timestamp TIMESTAMP NOT NULL,
+    current_longitude FLOAT NOT NULL,
+    current_latitude FLOAT NOT NULL,
+    current_speed FLOAT,
+    current_segment VARCHAR(20), -- LOAD_TIME, LOAD_TRAVEL, DUMP_TIME, EMPTY_TRAVEL, NULL
+    
+    -- Nearest loader information (selected from asset table)
+    nearest_loader_asset_guid VARCHAR(255),
+    nearest_loader_location VARCHAR(255), -- '(lat, lon)'
+    nearest_loader_distance FLOAT, -- Distance in meters
+    
+    -- Active dump region information (selected from Redis)
+    active_dump_region_guid VARCHAR(255),
+    active_dump_region_name VARCHAR(255),
+    active_dump_region_location TEXT, -- '[(lat,lon)...]'
+    
+    -- Cycle timing information
+    load_start_utc TIMESTAMP,
+    load_end_utc TIMESTAMP,
+    dump_start_utc TIMESTAMP,
+    dump_end_utc TIMESTAMP,
+    
+    -- Duration calculations (in seconds)
+    load_travel_duration INTEGER,
+    empty_travel_duration INTEGER,
+    dump_duration INTEGER,
+    load_duration INTEGER,
+    total_cycle_duration INTEGER,
+    
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Reference table for loader units (existing)
+CREATE TABLE asset (
+    asset_guid VARCHAR(255) PRIMARY KEY,
+    asset_type VARCHAR(50),
+    latitude FLOAT,
+    longitude FLOAT,
+    site_guid VARCHAR(255)
+);
+
+-- Indexes for efficient querying
+CREATE INDEX idx_asset_cycle_vlx_site_asset_status 
+ON asset_cycle_vlx(site_guid, cycle_truck_asset_guid, cycle_status);
+
+CREATE INDEX idx_asset_cycle_vlx_timestamp 
+ON asset_cycle_vlx(current_timestamp);
+
+CREATE INDEX idx_asset_cycle_vlx_nearest_loader 
+ON asset_cycle_vlx(nearest_loader_asset_guid);
+
+CREATE INDEX idx_asset_cycle_vlx_dump_region 
+ON asset_cycle_vlx(active_dump_region_guid);
+
+CREATE INDEX idx_asset_site_type 
+ON asset(site_guid, asset_type);
+                    </div>
+                    
+                    <div class="conditions-list">
+                        <strong>Redis Data Structure (expected format):</strong>
+                        <ul>
+                            <li><strong>Key:</strong> dump_regions:{site_guid}</li>
+                            <li><strong>Parameter:</strong> site_guid from Kinesis GPS data</li>
+                            <li><strong>Processing:</strong> Check GPS point against all dump regions for the site</li>
+                            <li><strong>Selection:</strong> Identify which specific region contains the truck GPS point</li>
+                        </ul>
+                    
