@@ -14,3 +14,4 @@ class CycleComparisonContext:
     loader_asset: Optional[LoaderAsset]
     loader_distance: Optional[float]
     dump_region: Optional[RegionPoly]
+    assets_in_same_location: Optional[bool] = None

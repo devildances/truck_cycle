@@ -286,6 +286,14 @@ class RecordProcessor(processor.RecordProcessorBase):
             ... )
         """
         ####################################
+        if data is None:
+            logger.warning("Received None data for processing")
+            return
+
+        if not isinstance(data, dict):
+            logger.warning(f"Expected dict but got {type(data)}: {data}")
+            return
+
         TX_TYPE = os.getenv("TX_TYPE")
         if TX_TYPE == "realtime":
             (
@@ -414,17 +422,89 @@ class RecordProcessor(processor.RecordProcessorBase):
             Periodic Checkpoint
         """
         try:
-            for record in process_records_input.records:
-                r_data = record.binary_data
-                dcd_data = r_data.decode('utf-8')
-                seq = int(record.sequence_number)
-                sub_seq = record.sub_sequence_number
-                key = record.partition_key
-                self.process_record(json.loads(dcd_data), key, seq, sub_seq)
-                if self.should_update_sequence(seq, sub_seq):
-                    self._largest_seq = (seq, sub_seq)
+            skipped_count = 0
+            error_count = 0
 
-            if time.time() - self._last_checkpoint_time > self._CHECKPOINT_FREQ_SECONDS:
+            for record in process_records_input.records:
+                try:
+                    r_data = record.binary_data
+                    dcd_data = r_data.decode('utf-8')
+
+                    # Handle different JSON structures
+                    seq = int(record.sequence_number)
+                    sub_seq = record.sub_sequence_number
+                    key = record.partition_key
+
+                    # Skip empty records
+                    if not dcd_data:
+                        logger.error("Skipping empty record after decode")
+                        skipped_count += 1
+                        continue
+
+                    # Parse JSON
+                    try:
+                        parsed_data = json.loads(dcd_data)
+                    except json.JSONDecodeError as e:
+                        logger.error(
+                            f"Failed to parse JSON: {e}, "
+                            f"data: '{dcd_data[:100]}'"
+                        )
+                        error_count += 1
+                        continue
+
+                    if parsed_data is None:
+                        logger.error("Skipping null JSON data")
+                        skipped_count += 1
+                        continue
+
+                    elif isinstance(parsed_data, dict):
+                        if len(parsed_data) > 0:
+                            self.process_record(
+                                json.loads(dcd_data), key, seq, sub_seq
+                            )
+                        else:
+                            logger.error("Skipping empty JSON object")
+                            skipped_count += 1
+                            continue
+
+                    elif isinstance(parsed_data, list):
+                        if len(parsed_data) == 0:
+                            logger.error("Skipping empty JSON array")
+                            skipped_count += 1
+                            continue
+                        else:
+                            # Process each item in the array
+                            for i, item in enumerate(parsed_data):
+                                if isinstance(item, dict) and len(item) > 0:
+                                    self.process_record(
+                                        json.loads(dcd_data), key, seq, sub_seq
+                                    )
+                                else:
+                                    logger.error(
+                                        f"Skipping invalid list item {i}: "
+                                        f"{type(item)}"
+                                    )
+                    else:
+                        logger.warning(
+                            f"Unexpected JSON type: {type(parsed_data)}"
+                        )
+                        error_count += 1
+                        continue
+
+                    if self.should_update_sequence(seq, sub_seq):
+                        self._largest_seq = (seq, sub_seq)
+
+                except Exception as e:
+                    logger.error(
+                        f"Error processing Kinesis record: {e}",
+                        exc_info=True
+                    )
+                    error_count += 1
+                    continue
+
+            # Checkpoint periodically
+            if ((time.time() - self._last_checkpoint_time)
+                    > self._CHECKPOINT_FREQ_SECONDS):
                 self.checkpoint(
                     process_records_input.checkpointer,
                     str(self._largest_seq[0]),

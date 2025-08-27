@@ -20,17 +20,19 @@ PGSQL_DB_SETTINGS = get_db_credentials_from_secrets_manager(
     aws_session_token=AWS_SESSION_TOKEN_ENV
 )
 
-DX_SCHEMA_NAME = "dx"
 PGSQL_ASSET_CYCLE_PROCESS_NAME = "asset_cycle_vlx"
-PGSQL_ASSET_CYCLE_TMP_TABLE_NAME = "asset_cycle_tmp_vlx_dev"
-PGSQL_ASSET_CYCLE_TABLE_NAME = "asset_cycle_vlx_dev"
+
+DX_SCHEMA_NAME = "dx"
+PGSQL_ASSET_CYCLE_TMP_TABLE_NAME = "asset_cycle_tmp_vlx"
+PGSQL_ASSET_CYCLE_TABLE_NAME = "asset_cycle_vlx"
 PGSQL_ASSET_TABLE_NAME = "asset"
-PGSQL_CHECKPOINT_TABLE_NAME = "tx_process_info_dev"
+PGSQL_REGION_TABLE_NAME = "region"
+PGSQL_CHECKPOINT_TABLE_NAME = "tx_process_info"
 
 ALLOWED_TABLES = [
     PGSQL_ASSET_CYCLE_TMP_TABLE_NAME,
     PGSQL_ASSET_CYCLE_TABLE_NAME,
     PGSQL_CHECKPOINT_TABLE_NAME,
     PGSQL_ASSET_TABLE_NAME,
-    "region"
+    PGSQL_REGION_TABLE_NAME
 ]

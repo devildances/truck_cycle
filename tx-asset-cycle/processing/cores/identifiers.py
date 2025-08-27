@@ -111,6 +111,8 @@ class CycleRecordFactory:
             "asset_guid": last_rec.asset_guid,
             "cycle_number": last_rec.cycle_number,
             "cycle_status": last_rec.cycle_status,
+            "current_process_date": curr_rec.timestamp,
+            "current_area": curr_rec.current_area,
             "site_guid": last_rec.site_guid,
             "current_segment": last_rec.current_segment,
             "previous_work_state_id": last_rec.current_work_state_id,
@@ -120,7 +122,11 @@ class CycleRecordFactory:
             "loader_longitude": last_rec.loader_longitude,
             "previous_loader_distance": last_rec.previous_loader_distance,
             "current_loader_distance": last_rec.current_loader_distance,
+            "idle_in_dump_region_guid": last_rec.idle_in_dump_region_guid,
             "dump_region_guid": last_rec.dump_region_guid,
+            "all_assets_in_same_dump_area": (
+                last_rec.all_assets_in_same_dump_area
+            ),
             "is_outlier": last_rec.is_outlier,
             "outlier_position_latitude": last_rec.outlier_position_latitude,
             "outlier_position_longitude": last_rec.outlier_position_longitude,
@@ -134,6 +140,8 @@ class CycleRecordFactory:
             "load_seconds": last_rec.load_seconds,
             "total_cycle_seconds": last_rec.total_cycle_seconds,
             "outlier_seconds": last_rec.outlier_seconds,
+            "cycle_start_utc": last_rec.cycle_start_utc,
+            "cycle_end_utc": last_rec.cycle_end_utc,
             "created_date": timestamp_to_utc_zero(last_rec.created_date),
             "updated_date": datetime.now(timezone.utc)
         }
@@ -142,8 +150,8 @@ class CycleRecordFactory:
     def create_new_cycle_params(
         curr_rec: RealtimeRecord,
         last_rec: CycleRecord,
-        loader_rec: LoaderAsset,
         context: CycleComparisonContext,
+        loader_rec: Optional[LoaderAsset] = None,
     ) -> Dict:
         """Create parameters for a new cycle record.
 
@@ -170,20 +178,34 @@ class CycleRecordFactory:
             "asset_guid": curr_rec.asset_guid,
             "cycle_number": last_rec.cycle_number + 1,
             "cycle_status": CycleStatus.INPROGRESS.value,
+            "current_process_date": curr_rec.timestamp,
+            "current_area": curr_rec.current_area,
             "site_guid": curr_rec.site_guid,
             "current_segment": CycleSegment.LOAD_TIME.value,
             "previous_work_state_id": None,
             "current_work_state_id": curr_rec.work_state_id,
-            "loader_asset_guid": loader_rec.asset_guid,
-            "loader_latitude": loader_rec.latitude,
-            "loader_longitude": loader_rec.longitude,
+            "loader_asset_guid": (
+                loader_rec.asset_guid if loader_rec else None
+            ),
+            "loader_latitude": (
+                loader_rec.latitude if loader_rec else None
+            ),
+            "loader_longitude": (
+                loader_rec.longitude if loader_rec else None
+            ),
             "previous_loader_distance": None,
             "current_loader_distance": context.loader_distance,
+            "idle_in_dump_region_guid": None,
             "dump_region_guid": None,
+            "all_assets_in_same_dump_area": False,
             "is_outlier": False,
             "outlier_position_latitude": None,
             "outlier_position_longitude": None,
-            "load_start_utc": timestamp_to_utc_zero(last_rec.updated_date),
+            "load_start_utc": (
+                timestamp_to_utc_zero(
+                    last_rec.current_process_date
+                ) if loader_rec else None
+            ),
             "load_end_utc": None,
             "dump_start_utc": None,
             "dump_end_utc": None,
@@ -193,6 +215,8 @@ class CycleRecordFactory:
             "load_seconds": None,
             "total_cycle_seconds": None,
             "outlier_seconds": None,
+            "cycle_start_utc": last_rec.current_process_date,
+            "cycle_end_utc": None,
             "created_date": datetime.now(timezone.utc),
             "updated_date": datetime.now(timezone.utc)
         }
@@ -228,6 +252,8 @@ class CycleRecordFactory:
             "asset_guid": curr_rec.asset_guid,
             "cycle_number": last_rec.cycle_number + 1,
             "cycle_status": CycleStatus.INPROGRESS.value,
+            "current_process_date": curr_rec.timestamp,
+            "current_area": curr_rec.current_area,
             "site_guid": curr_rec.site_guid,
             "current_segment": None,
             "previous_work_state_id": None,
@@ -237,7 +263,9 @@ class CycleRecordFactory:
             "loader_longitude": None,
             "previous_loader_distance": None,
             "current_loader_distance": None,
+            "idle_in_dump_region_guid": None,
             "dump_region_guid": None,
+            "all_assets_in_same_dump_area": False,
             "is_outlier": False,
             "outlier_position_latitude": None,
             "outlier_position_longitude": None,
@@ -251,6 +279,8 @@ class CycleRecordFactory:
             "load_seconds": None,
             "total_cycle_seconds": None,
             "outlier_seconds": None,
+            "cycle_start_utc": curr_rec.timestamp,
+            "cycle_end_utc": None,
             "created_date": datetime.now(timezone.utc),
             "updated_date": datetime.now(timezone.utc)
         }

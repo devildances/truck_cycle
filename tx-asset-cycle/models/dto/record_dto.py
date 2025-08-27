@@ -49,6 +49,8 @@ class RealtimeRecord:
     longitude: float
     latitude: float
 
+    current_area: Optional[str] = None  # ["TRAVEL", "LOAD", "DUMP"]
+
 
 @dataclass
 class BaseRecord(ABC):
@@ -353,6 +355,8 @@ class CycleRecord(BaseRecord):
     asset_guid: str
     cycle_number: int
     cycle_status: str  # ["INPROGRESS", "COMPLETE", "INVALID", "OUTLIER"]
+    current_process_date: datetime
+    current_area: str
     site_guid: str
     current_work_state_id: int  # 3 if working, 2 if idling
     created_date: datetime
@@ -376,7 +380,9 @@ class CycleRecord(BaseRecord):
     loader_longitude: Optional[float] = None
     previous_loader_distance: Optional[float] = None
     current_loader_distance: Optional[float] = None
+    idle_in_dump_region_guid: Optional[str] = None
     dump_region_guid: Optional[str] = None
+    all_assets_in_same_dump_area: Optional[bool] = None
     is_outlier: Optional[bool] = None
     outlier_position_latitude: Optional[float] = None
     outlier_position_longitude: Optional[float] = None
@@ -390,6 +396,8 @@ class CycleRecord(BaseRecord):
     load_seconds: Optional[float] = None
     total_cycle_seconds: Optional[float] = None
     outlier_seconds: Optional[float] = None
+    cycle_start_utc: Optional[datetime] = None,
+    cycle_end_utc: Optional[datetime] = None
 
     @classmethod
     def generate_insert_query_final(cls: Type[X]) -> sql.SQL:

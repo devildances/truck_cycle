@@ -418,7 +418,9 @@ class DurationCalculator:
     Example:
         >>> calc = DurationCalculator()
         >>> duration = calc.calculate_seconds(start_time, end_time)
-        >>> idle_time = calc.calculate_idle_duration(last_update)
+        >>> idle_time = calc.calculate_idle_duration(
+        ...     previous_time, current_time
+        ... )
     """
 
     @staticmethod
@@ -453,27 +455,33 @@ class DurationCalculator:
         return None
 
     @staticmethod
-    def calculate_idle_duration(last_updated: datetime) -> float:
-        """Calculate idle duration from last update to now.
+    def calculate_idle_duration(
+        previous_process_date: datetime,
+        current_process_date: datetime
+    ) -> float:
+        """Calculate idle duration between two timestamps.
 
         Computes how long a truck has been idle by calculating the time
-        difference between the last update timestamp and the current time.
+        difference between the previous process timestamp and the current
+        process timestamp.
 
         Args:
-            last_updated: Timestamp of the last record update
+            previous_process_date: Timestamp of the previous record
+            current_process_date: Timestamp of the current record
 
         Returns:
-            float: Duration in seconds since last update
+            float: Duration in seconds between the two timestamps
 
         Note:
-            This method always returns a value (never None) as it uses
-            the current time as the end point.
+            This method always returns a value (never None) as both
+            timestamps are required parameters.
 
         Example:
-            >>> last_update = datetime.now(timezone.utc) - timedelta(minutes=5)
-            >>> idle_seconds = calculate_idle_duration(last_update)
-            >>> print(idle_seconds)  # ~300.0
+            >>> previous = datetime(2024, 1, 1, 10, 0, 0)
+            >>> current = datetime(2024, 1, 1, 10, 5, 0)
+            >>> idle_seconds = calculate_idle_duration(previous, current)
+            >>> print(idle_seconds)  # 300.0
         """
-        now = datetime.now(timezone.utc)
-        last = timestamp_to_utc_zero(last_updated)
-        return (now - last).total_seconds()
+        current = timestamp_to_utc_zero(current_process_date)
+        previous = timestamp_to_utc_zero(previous_process_date)
+        return (current - previous).total_seconds()

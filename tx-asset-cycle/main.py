@@ -14,9 +14,9 @@ def logging_setup() -> None:
     if app_logger.hasHandlers():
         app_logger.handlers.clear()
 
-    app_logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
+    app_logger.setLevel(logging.ERROR)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.ERROR)
 
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s "

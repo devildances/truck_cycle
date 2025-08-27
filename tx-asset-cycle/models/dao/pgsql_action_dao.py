@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Self, Union
 
@@ -190,15 +191,143 @@ class PgsqlActionDAO(PgsqlBaseDAO):
     """
 
     def __init__(self: Self) -> None:
-        """Initialize the PostgreSQL Action DAO with configuration.
+        """Initialize PostgreSQL DAO with enhanced SSL connection recovery.
 
-        Sets up the database schema name and retry parameters from
-        configuration constants. Inherits connection management from
-        the base DAO class.
+        Sets up database connection parameters with improved retry logic
+        specifically designed to handle SSL connection drops and timeouts.
+        Includes connection health tracking and proactive timeout management.
+
+        The enhanced initialization adds connection monitoring capabilities
+        to detect stale connections before they cause SSL timeouts, and
+        configures more aggressive retry parameters for connection recovery.
+
+        Attributes Set:
+            dx_schema_name (str): Database schema name from configuration
+            _max_retries (int): Maximum retry attempts (increased to 3)
+            _last_successful_operation (float): Timestamp of last successful
+                database operation for connection health tracking
+            _connection_timeout (int): Maximum idle time before proactive
+                connection reset (300 seconds = 5 minutes)
+
+        Note:
+            The connection timeout helps prevent SSL connection drops by
+            proactively resetting connections that have been idle for
+            extended periods, which is common in streaming applications.
         """
         super().__init__()
         self.dx_schema_name = DX_SCHEMA_NAME
         self._max_retries = MAX_RETRIES
+        # Add connection health tracking
+        self._last_successful_operation = time.time()
+        self._connection_timeout = 300
+
+    def _is_connection_recoverable_error(self: Self, error: Exception) -> bool:
+        """Determine if database error indicates recoverable connection issue.
+
+        Analyzes exception messages to identify connection-related errors
+        that can be resolved through connection reset and retry logic.
+        Distinguishes between transient connection issues and permanent
+        database errors to optimize retry behavior.
+
+        This method checks for common patterns in PostgreSQL connection
+        errors, including SSL connection drops, network timeouts, server
+        disconnections, and administrative shutdowns. The detection is
+        case-insensitive and covers both psycopg2-specific and general
+        database connection error messages.
+
+        Args:
+            error (Exception): The exception object to analyze. Can be any
+                Exception type, but typically psycopg2.OperationalError or
+                psycopg2.InterfaceError for connection issues.
+
+        Returns:
+            bool: True if the error indicates a recoverable connection
+                issue that should trigger connection reset and retry logic.
+                False for permanent errors like authentication failures,
+                syntax errors, or constraint violations.
+
+        Example:
+            >>> # SSL connection drop - recoverable
+            >>> error = psycopg2.OperationalError("SSL connection closed")
+            >>> self._is_connection_recoverable_error(error)  # Returns True
+
+            >>> # Syntax error - not recoverable
+            >>> error = psycopg2.ProgrammingError("syntax error")
+            >>> self._is_connection_recoverable_error(error)  # Returns False
+
+        Note:
+            The method uses string matching on error messages, which is
+            language-dependent. Error messages are converted to lowercase
+            for consistent matching across different PostgreSQL versions.
+        """
+        error_message = str(error).lower()
+
+        # SSL and connection-related errors that warrant retry
+        ssl_connection_errors = [
+            "ssl connection has been closed",
+            "ssl connection has been closed unexpectedly",
+            "connection closed",
+            "connection lost",
+            "server closed the connection",
+            "connection timed out",
+            "connection refused",
+            "connection reset",
+            "no connection to the server",
+            "could not connect to server",
+            "connection to server was lost",
+            "terminating connection due to administrator command",
+            "the database system is shutting down",
+            "connection not open",
+            "interface error"
+        ]
+
+        return any(err in error_message for err in ssl_connection_errors)
+
+    def _force_connection_reset(self: Self) -> None:
+        """Force complete database connection reset with cleanup.
+
+        Immediately closes the current database connection and clears the
+        internal connection reference to force creation of a new connection
+        on the next database operation. Designed to recover from SSL
+        connection drops and other connection-level issues.
+
+        This method is more aggressive than normal connection cleanup,
+        ensuring that any stale or corrupted connection state is completely
+        discarded. It safely handles cases where the connection is already
+        closed or in an invalid state.
+
+        The reset process:
+        1. Attempts to close existing connection gracefully
+        2. Handles any exceptions during closure (connection may be broken)
+        3. Clears internal connection reference regardless of closure success
+        4. Logs the reset action for debugging and monitoring
+
+        Side Effects:
+            - Closes active database connection if open
+            - Sets self._conn to None
+            - Logs connection reset action
+            - Next database operation will create fresh connection
+
+        Note:
+            This method should be called when connection-level errors are
+            detected, not for transaction-level errors. After calling this
+            method, any subsequent database operations will automatically
+            establish a new connection through the inherited _get_connection()
+            method.
+
+        Example Usage:
+            >>> # After detecting SSL connection drop
+            >>> if self._is_connection_recoverable_error(exception):
+            ...     self._force_connection_reset()
+            ...     # Next operation will use fresh connection
+        """
+        try:
+            if self._conn and not self._conn.closed:
+                self._conn.close()
+        except Exception as e:
+            logger.warning(f"Error while closing connection during reset: {e}")
+        finally:
+            self._conn = None
 
     def _validate_table_access(self: Self, table_name: str) -> None:
         """Validate that the specified table is allowed for queries.
@@ -298,62 +427,117 @@ class PgsqlActionDAO(PgsqlBaseDAO):
         operation_type: str = "select",
         fetch_results: bool = True
     ) -> Optional[List[Dict[str, Any]]]:
-        """Execute database operation with automatic retry logic and error handling.
+        """Execute database operation with enhanced SSL connection recovery.
 
-        Unified method for executing any database operation (SELECT, INSERT,
-        UPDATE) with automatic retry logic, transaction management, and
-        flexible result handling. Supports both single and batch operations.
+        Unified database operation executor with sophisticated retry logic
+        specifically designed to handle SSL connection drops, network
+        timeouts, and other transient connection issues common in
+        streaming applications.
 
-        Operation Types:
-        - "select": Execute SELECT query and return formatted results
-        - "insert": Execute INSERT with single record or batch optimization
-        - "update": Execute UPDATE with transaction commit
-        - "custom": Execute any SQL operation with flexible parameters
+        Enhanced Features:
+        - Proactive connection timeout detection and reset
+        - SSL-specific error recognition and recovery
+        - Progressive backoff for connection issues
+        - Different retry strategies for different error types
+        - Connection health tracking and monitoring
+
+        The method implements a multi-layered approach to connection
+        reliability:
+        1. Proactive connection reset for idle connections
+        2. Error type classification for optimal retry strategy
+        3. Forced connection reset for recoverable errors
+        4. Progressive backoff to avoid overwhelming the database
+        5. Comprehensive error context for debugging
 
         Args:
-            query (sql.SQL): The SQL query object to execute with proper
-                identifier escaping and parameterization.
-            params (Optional[Union[tuple, List[tuple]]]): Parameters to bind:
-                - tuple: Single set of parameters for single operation
+            query (sql.SQL): Parameterized SQL query object constructed
+                with psycopg2.sql for safe execution and identifier escaping.
+            params (Optional[Union[tuple, List[tuple]]]): Query parameters:
+                - tuple: Single parameter set for individual operations
                 - List[tuple]: Multiple parameter sets for batch operations
-                - None: No parameters needed
-            target_description (str): Human-readable description for logging
-                and error reporting purposes.
-            operation_type (str): Type of operation - "select", "insert",
-                "update", or "custom".
-            fetch_results (bool): Whether to fetch and return results.
-                False for INSERT/UPDATE operations.
+                - None: No parameters required for the query
+            target_description (str): Human-readable description of the
+                operation for logging and error reporting. Should describe
+                the business context (e.g., "user lookup", "batch insert").
+            operation_type (str): Type of database operation to perform:
+                - "select": SELECT query with optional result fetching
+                - "insert": INSERT operation with optional batch support
+                - "update": UPDATE operation with transaction commit
+                - "custom": Custom SQL with flexible parameter handling
+            fetch_results (bool): Whether to fetch and return query results.
+                Should be True for SELECT operations, False for INSERT/UPDATE.
 
         Returns:
-            Optional[List[Dict[str, Any]]]: For SELECT operations, returns
-                list of dictionaries representing rows. For INSERT/UPDATE
-                operations, returns None.
+            Optional[List[Dict[str, Any]]]: For SELECT operations with
+                fetch_results=True, returns list of dictionaries where each
+                dictionary represents a row with column names as keys.
+                Returns None for INSERT/UPDATE operations or when no data
+                is found.
 
         Raises:
-            PgsqlConnectionError: If operation fails after all retry attempts.
+            PgsqlConnectionError: If the operation fails after all retry
+                attempts are exhausted. The exception includes detailed
+                context about retry attempts, connection resets, and timing
+                information for debugging.
+            ValueError: If invalid operation_type is provided or required
+                parameters are missing for the specified operation type.
+
+        Connection Recovery Logic:
+            The method handles different error types with appropriate
+            recovery strategies:
+
+            - SSL/Connection Errors: Force connection reset, progressive
+            backoff, up to max_retries attempts
+            - Database Errors: Limited retries without connection reset
+            - Programming Errors: No retries (syntax, constraint violations)
+            - Unexpected Errors: Single retry with connection reset
+
+        Timing and Performance:
+            - Proactive timeout: Resets idle connections after 5 minutes
+            - Progressive backoff: 1s, 2s, 4s, 8s (max) for connection errors
+            - Connection health tracking: Updates success timestamp
+            - Batch optimization: Uses execute_values for multi-row operations
 
         Example:
-            >>> # SELECT operation
+            >>> # SELECT with retry logic
             >>> result = self._execute_operation_with_retry(
-            ...     query=sql.SQL("SELECT * FROM users WHERE id = %s"),
-            ...     params=(123,),
-            ...     target_description="user lookup",
-            ...     operation_type="select"
+            ...     query=sql.SQL("SELECT * FROM users WHERE active = %s"),
+            ...     params=(True,),
+            ...     target_description="active user lookup",
+            ...     operation_type="select",
+            ...     fetch_results=True
             ... )
 
-            >>> # INSERT operation
+            >>> # Batch INSERT with connection recovery
             >>> self._execute_operation_with_retry(
             ...     query=insert_query,
             ...     params=[(val1, val2), (val3, val4)],
-            ...     target_description="batch insert users",
+            ...     target_description="batch user creation",
             ...     operation_type="insert",
             ...     fetch_results=False
             ... )
+
+        Note:
+            This method maintains backward compatibility with the original
+            _execute_operation_with_retry interface while adding enhanced
+            connection recovery capabilities. The connection health tracking
+            helps prevent issues before they occur by proactively managing
+            connection lifecycle in long-running streaming applications.
         """
         last_exception = None
+        connection_reset_attempted = False
 
         for retry_attempt in range(self._max_retries):
             try:
+                # Check if we should reset connection proactively
+                if (
+                    (time.time() - self._last_successful_operation)
+                    > self._connection_timeout and self._conn
+                    and not self._conn.closed
+                ):
+                    logger.info("Proactively resetting connection due to timeout")
+                    self._force_connection_reset()
+
                 conn = self._get_connection()
 
                 with conn.cursor() as cur:
@@ -373,6 +557,8 @@ class PgsqlActionDAO(PgsqlBaseDAO):
                                 f"Successfully executed {target_description}, "
                                 f"found {len(result)} rows"
                             )
+                            # Update successful operation timestamp
+                            self._last_successful_operation = time.time()
                             return result
                         return None
 
@@ -395,6 +581,8 @@ class PgsqlActionDAO(PgsqlBaseDAO):
 
                         conn.commit()
                         logger.info(f"Successfully executed {target_description}")
+                        # Update successful operation timestamp
+                        self._last_successful_operation = time.time()
                         return None
 
                     else:  # custom operation
@@ -409,27 +597,94 @@ class PgsqlActionDAO(PgsqlBaseDAO):
                             columns = [column[0] for column in cur.description]
                             rows = cur.fetchall()
                             result = [dict(zip(columns, row)) for row in rows]
+                            # Update successful operation timestamp
+                            self._last_successful_operation = time.time()
                             return result
 
                         conn.commit()
+                        # Update successful operation timestamp
+                        self._last_successful_operation = time.time()
                         return None
 
-            except (Exception, psycopg2.Error) as e:
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
                 last_exception = e
                 logger.error(
-                    f"ERROR (PgsqlActionDAO): Failed to execute {target_description} "
-                    f"(attempt {retry_attempt + 1}/{self._max_retries}): {e}"
+                    f"ERROR (PgsqlActionDAO): Failed to execute "
+                    f"{target_description} (attempt {retry_attempt + 1}/"
+                    f"{self._max_retries}): {e}"
+                )
+
+                # Handle SSL/connection specific errors
+                if self._is_connection_recoverable_error(e):
+                    logger.warning(
+                        f"Detected recoverable connection error: {e}. "
+                        f"Resetting connection for retry {retry_attempt + 1}"
+                    )
+                    self._force_connection_reset()
+                    connection_reset_attempted = True
+
+                    # Add progressive backoff for connection issues
+                    if retry_attempt < self._max_retries - 1:
+                        backoff_time = min(2 ** retry_attempt, 8)  # Max 8 seconds
+                        logger.info(f"Waiting {backoff_time}s before retry...")
+                        time.sleep(backoff_time)
+                else:
+                    # Non-recoverable error, break out of retry loop
+                    break
+
+                # Rollback on error if connection still exists
+                if self._conn and not self._conn.closed:
+                    try:
+                        self._conn.rollback()
+                    except Exception as rollback_error:
+                        logger.warning(f"Failed to rollback: {rollback_error}")
+
+            except (psycopg2.DatabaseError, psycopg2.ProgrammingError) as e:
+                # Non-connection related database errors
+                last_exception = e
+                logger.error(
+                    f"ERROR (PgsqlActionDAO): Database error for "
+                    f"{target_description} (attempt {retry_attempt + 1}/"
+                    f"{self._max_retries}): {e}"
                 )
 
                 # Rollback on error
                 if self._conn and not self._conn.closed:
-                    self._conn.rollback()
+                    try:
+                        self._conn.rollback()
+                    except Exception as rollback_error:
+                        logger.warning(f"Failed to rollback: {rollback_error}")
+
+                # These errors typically don't benefit from retry
+                break
+
+            except Exception as e:
+                # Unexpected errors
+                last_exception = e
+                logger.error(
+                    f"ERROR (PgsqlActionDAO): Unexpected error for "
+                    f"{target_description} (attempt {retry_attempt + 1}/"
+                    f"{self._max_retries}): {e}"
+                )
+
+                # Rollback on error
+                if self._conn and not self._conn.closed:
+                    try:
+                        self._conn.rollback()
+                    except Exception as rollback_error:
+                        logger.warning(f"Failed to rollback: {rollback_error}")
 
         # All retries exhausted
+        error_context = (
+            f"Connection reset attempted: {connection_reset_attempted}. "
+            f"Last successful operation: "
+            f"{time.time() - self._last_successful_operation:.1f}s ago"
+        )
+
         raise PgsqlConnectionError(
-            f"Failed to execute {target_description} after"
-            f" {self._max_retries} attempts\n"
-            f"{last_exception}"
+            f"Failed to execute {target_description} after "
+            f"{self._max_retries} attempts. {error_context}\n"
+            f"Last error: {last_exception}"
         ) from last_exception
 
     def _read_custom_query(

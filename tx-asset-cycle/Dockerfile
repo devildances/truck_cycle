@@ -50,7 +50,7 @@ WORKDIR /usr/src/app
 
 COPY pyproject.toml poetry.lock ./
 
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=$POETRY_CACHE_DIR \
     poetry install --only main --no-root --quiet || \
     poetry install --only main --no-root --quiet || \
     poetry install --only main --no-root --quiet
@@ -101,14 +101,11 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 
 ENV JAVA_HOME=/usr/lib/jvm/java-17-amazon-corretto
 ENV PATH=$JAVA_HOME/bin:$PATH
-ENV JAVA_OPTS="-Xms512m -Xmx768m -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:+ExitOnOutOfMemoryError"
+ENV JAVA_OPTS="-XX:+UseContainerSupport -Xms768m -Xmx768m -XX:MaxMetaspaceSize=128m -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp"
 
 # Build arguments for AWS configuration
 ARG PGSQL_CREDENTIALS_SECRET_NAME
 ARG REDIS_CREDENTIALS_SECRET_NAME
-ARG AWS_ACCESS_KEY_ID
-ARG AWS_SECRET_ACCESS_KEY
-ARG AWS_SESSION_TOKEN
 ARG AWS_REGION
 ARG TX_TYPE
 
@@ -118,9 +115,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/usr/src/app:${PYTHONPATH} \
     PGSQL_CREDENTIALS_SECRET_NAME=$PGSQL_CREDENTIALS_SECRET_NAME \
     REDIS_CREDENTIALS_SECRET_NAME=$REDIS_CREDENTIALS_SECRET_NAME \
-    AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
-    AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-    AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN \
     AWS_REGION=$AWS_REGION \
     TX_TYPE=$TX_TYPE \
     OTEL_RESOURCE_ATTRIBUTES=service.name="tx-asset-cycle-vlx"
@@ -138,7 +132,7 @@ COPY --from=packages-builder /usr/local/bin/ /usr/local/bin/
 COPY --chown=appuser:appuser ./main.py ./
 COPY --chown=appuser:appuser ./config ./config
 COPY --chown=appuser:appuser ./models ./models
-COPY --chown=appuser:appuser ./preprocessing ./preprocessing
+COPY --chown=appuser:appuser ./processing ./processing
 COPY --chown=appuser:appuser ./utils ./utils
 
 # Fix Python symlinks
