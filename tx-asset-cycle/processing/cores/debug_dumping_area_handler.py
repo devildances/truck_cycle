@@ -257,8 +257,6 @@ class DumpingAreaHandler(CycleStateHandler):
             if segment == CycleSegment.DUMP_TIME.value:
                 # Already in DUMP_TIME, no action needed
                 logger.debug(
-                    f"[CORE DEBUG] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
                     f"Already in DUMP_TIME for cycle {last_rec.cycle_number}"
                 )
                 return None, None
@@ -318,9 +316,7 @@ class DumpingAreaHandler(CycleStateHandler):
 
         if not dump_region:
             logger.error(
-                f"[CORE ERROR] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "Cannot start DUMP_TIME without dump region information "
+                f"Cannot start DUMP_TIME without dump region information "
                 f"for cycle {last_rec.cycle_number}"
             )
             return None, None
@@ -397,9 +393,7 @@ class DumpingAreaHandler(CycleStateHandler):
 
         if not dump_region:
             logger.error(
-                f"[CORE ERROR] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "Cannot start DUMP_TIME without dump region information "
+                f"Cannot start DUMP_TIME without dump region information "
                 f"for cycle {last_rec.cycle_number}"
             )
             return None, None
@@ -420,9 +414,7 @@ class DumpingAreaHandler(CycleStateHandler):
         })
 
         logger.warning(
-            f"[CORE WARNING] {curr_rec.asset_guid} "
-            f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-            "Starting DUMP_TIME from unexpected segment "
+            f"Starting DUMP_TIME from unexpected segment "
             f"{last_rec.current_segment} for cycle {last_rec.cycle_number}"
         )
 
@@ -494,9 +486,7 @@ class DumpingAreaHandler(CycleStateHandler):
             })
 
             logger.debug(
-                f"[CORE DEBUG] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "State transition WORKING->IDLING in dump area "
+                f"State transition WORKING->IDLING in dump area "
                 f"for cycle {last_rec.cycle_number}"
             )
 
@@ -538,9 +528,7 @@ class DumpingAreaHandler(CycleStateHandler):
                 })
 
                 logger.debug(
-                    f"[CORE DEBUG] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "State transition IDLING->WORKING in dump area "
+                    f"State transition IDLING->WORKING in dump area "
                     f"for cycle {last_rec.cycle_number}"
                 )
 
@@ -734,9 +722,7 @@ class DumpingAreaHandler(CycleStateHandler):
                 )
             else:
                 logger.warning(
-                    f"[CORE WARNING] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "Cannot calculate load_travel_seconds for cycle "
+                    f"Cannot calculate load_travel_seconds for cycle "
                     f"{last_rec.cycle_number}: load_end_utc is NULL"
                 )
 
@@ -779,9 +765,7 @@ class DumpingAreaHandler(CycleStateHandler):
                     f.write(f"[LOCAL DEBUG] | CYCLE {last_rec.cycle_number} | {curr_rec.timestamp} [{curr_rec.latitude}, {curr_rec.longitude}] | dumping_area_handler.py #754 | ADD DUMP SECONDS VALUE {last_rec.dump_seconds}s + {idle_duration}s | PREVIOUS SEGMENT IS EMPTY_TRAVEL\n")
 
                 logger.debug(
-                    f"[CORE DEBUG] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "Continued dumping at same region for cycle "
+                    f"Continued dumping at same region for cycle "
                     f"{last_rec.cycle_number}: Additional "
                     f"{idle_duration:.1f}s, total dump time "
                     f"{total_dump_seconds:.1f}s"
@@ -789,9 +773,7 @@ class DumpingAreaHandler(CycleStateHandler):
             else:
                 # Different dump region - this is unusual
                 logger.warning(
-                    f"[CORE WARNING] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "Truck in EMPTY_TRAVEL moved to different dump region "
+                    f"Truck in EMPTY_TRAVEL moved to different dump region "
                     f"(was: {last_rec.dump_region_guid}, "
                     f"now: {dump_region.region_guid}) for cycle "
                     f"{last_rec.cycle_number}. Treating as new dump."
@@ -837,11 +819,9 @@ class DumpingAreaHandler(CycleStateHandler):
                 f.write(f"[LOCAL DEBUG] | CYCLE {last_rec.cycle_number} | {curr_rec.timestamp} [{curr_rec.latitude}, {curr_rec.longitude}] | dumping_area_handler.py #807 | ADD DUMP SECONDS VALUE {idle_duration}s | PREVIOUS SEGMENT IS NONE\n")
 
             logger.warning(
-                f"[CORE WARNING] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "Implied DUMP_TIME from initial record (no segment) "
+                f"Implied DUMP_TIME from initial record (no segment) "
                 f"for cycle {last_rec.cycle_number}. Cycle will likely "
-                "be INVALID due to missing LOAD segments."
+                f"be INVALID due to missing LOAD segments."
             )
 
         else:
@@ -859,9 +839,7 @@ class DumpingAreaHandler(CycleStateHandler):
                 f.write(f"[LOCAL DEBUG] | CYCLE {last_rec.cycle_number} | {curr_rec.timestamp} [{curr_rec.latitude}, {curr_rec.longitude}] | dumping_area_handler.py #826 | ADD DUMP SECONDS VALUE {idle_duration}s | PREVIOUS SEGMENT IS {last_rec.current_segment}\n")
 
             logger.warning(
-                f"[CORE WARNING] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "Implied DUMP_TIME from unexpected segment "
+                f"Implied DUMP_TIME from unexpected segment "
                 f"{last_rec.current_segment} for cycle "
                 f"{last_rec.cycle_number}. Transitioning to EMPTY_TRAVEL."
             )

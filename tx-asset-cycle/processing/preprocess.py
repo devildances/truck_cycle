@@ -2,10 +2,10 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
-from psycopg2 import sql
 from shapely.geometry import Point as ShapelyPoint
 
 from config.postgresql_config import (PGSQL_ASSET_CYCLE_PROCESS_NAME,
+                                      PGSQL_ASSET_CYCLE_REPRO_TMP_TABLE_NAME,
                                       PGSQL_ASSET_CYCLE_TMP_TABLE_NAME,
                                       PGSQL_ASSET_TABLE_NAME,
                                       PGSQL_CHECKPOINT_TABLE_NAME)
@@ -17,6 +17,9 @@ from models.dto.asset_dto import LoaderAsset, TruckAsset
 from models.dto.record_dto import (CycleRecord, ProcessInfoRecord,
                                    RealtimeRecord)
 from models.dto.region_polygon_dto import RegionPoly
+from models.query.custom_queries import (get_last_cycle_number_asset_query,
+                                         get_loaders_from_asset_idle_query,
+                                         get_loaders_from_process_info_query)
 from models.query.target_columns import LAST_RECORD_COLS, LATEST_PI_COLS
 from utils import checkpoint
 from utils.utilities import (get_stack_trace_py, haversine_distance,
@@ -252,8 +255,11 @@ def is_current_record_older(
 
             if current_timestamp <= cached_last_timestamp:
                 logger.warning(
-                    "Current data is older or equal than "
-                    "the last data point in the process info table."
+                    f"[PREPROCESS WARNING] {current_record.asset_guid} "
+                    f"{current_record.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
+                    "Current data is older or equal than the last data point "
+                    f"({cached_last_timestamp.strftime('%Y-%m-%d %H:%M:%S')}) "
+                    "in in-memory cache."
                 )
                 return True
         except Exception as parse_error:
@@ -274,13 +280,15 @@ def is_current_record_older(
             "table": PGSQL_CHECKPOINT_TABLE_NAME,
             "target_columns": ["tx_process_info_id", "process_date"],
             "target_filter": filter_statement,
-            "target_limit": "1",
+            "target_limit": 1,
         }
         latest_pi = pgsql_conn.pull_data_from_table(single_query=latest_pi_params)
         if latest_pi:
             logger.warning(
-                "Current data is older or equal than "
-                "the last data point in the process info table."
+                f"[PREPROCESS WARNING] {current_record.asset_guid} "
+                f"{current_record.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
+                "Current data is older or equal than the last data point "
+                f"in the process info table."
             )
             return True
     except Exception as db_error:
@@ -331,7 +339,7 @@ def get_latest_process_info(
             f"asset_guid = '{asset_guid}' "
             f"AND process_name = '{PGSQL_ASSET_CYCLE_PROCESS_NAME}' "
         ),
-        "target_limit": "1",
+        "target_limit": 1,
         "target_order": "process_date DESC"
     }
     latest_process_info = pgsql_conn.pull_data_from_table(
@@ -363,7 +371,8 @@ def get_latest_process_info(
 def get_last_cycle_details(
     pgsql_conn: PgsqlActionDAO,
     site_guid: str,
-    asset_guid: str
+    asset_guid: str,
+    service_type: str
 ) -> Optional[CycleRecord]:
     """Retrieve the most recent in-progress cycle record for an asset.
 
@@ -388,15 +397,20 @@ def get_last_cycle_details(
         recent cycle is returned when multiple in-progress cycles exist
         (which shouldn't happen under normal circumstances).
     """
+    if service_type == "realtime":
+        target_table = PGSQL_ASSET_CYCLE_TMP_TABLE_NAME
+    else:
+        target_table = PGSQL_ASSET_CYCLE_REPRO_TMP_TABLE_NAME
+
     last_cycle_params = {
-        "table": PGSQL_ASSET_CYCLE_TMP_TABLE_NAME,
+        "table": target_table,
         "target_columns": LAST_RECORD_COLS,
         "target_filter": (
             f"asset_guid = '{asset_guid}' "
             f"AND site_guid = '{site_guid}' "
             "AND cycle_status = 'INPROGRESS'"
         ),
-        "target_limit": "1",
+        "target_limit": 1,
         "target_order": "cycle_number DESC"
     }
     last_cycle_rec = pgsql_conn.pull_data_from_table(
@@ -405,9 +419,32 @@ def get_last_cycle_details(
     return CycleRecord(**last_cycle_rec[0]) if last_cycle_rec else None
 
 
+def get_next_cycle_number_for_reprocess(
+        pgsql_conn: PgsqlActionDAO,
+        target_params: Optional[list]
+) -> Optional[int]:
+    query_config = {
+        "query": get_last_cycle_number_asset_query(),
+        "params": target_params if target_params else None
+    }
+    try:
+        record = pgsql_conn.pull_data_from_table(
+            custom_query=query_config
+        )
+        next_cycle_number = record[0].get("cycle_number")
+        if next_cycle_number:
+            next_cycle_number = int(next_cycle_number) + 1
+        return next_cycle_number
+    except Exception as e:
+        logger.error(
+            "Error retrieving last cycle number "
+            f"for asset {target_params[0]}: {e}"
+        )
+
+
 def get_all_loaders_in_site(
     pgsql_conn: PgsqlActionDAO,
-    target_query: sql.SQL,
+    service_type: str,
     target_params: Optional[list]
 ) -> List[LoaderAsset]:
     """Retrieve all loader assets in a site using a custom SQL query.
@@ -437,11 +474,18 @@ def get_all_loaders_in_site(
     """
     site_guid = target_params[0]
 
+    if service_type == "realtime":
+        target_query = get_loaders_from_process_info_query()
+        query_params = target_params[:1]
+    else:
+        target_query = get_loaders_from_asset_idle_query()
+        query_params = target_params
+
     try:
         target_loaders = []
         all_loaders_params = {
             "query": target_query,
-            "params": target_params if target_params else None
+            "params": query_params if query_params else None
         }
         loaders = pgsql_conn.pull_data_from_table(
             custom_query=all_loaders_params
@@ -511,23 +555,24 @@ def is_truck_near_any_loader(
         return (None, None,)
 
 
-def get_all_dump_regions(
+def get_all_regions(
     redis_conn: RedisSourceDAO,
-    site_guid: str
+    site_guid: str,
+    region_type: str
 ) -> Optional[List[RegionPoly]]:
     """
-    Retrieve all dump regions for a mining site as polygon objects.
+    Retrieve all regions for a mining site as polygon objects.
 
-    Fetches dump region data from Redis and converts them into RegionPoly
+    Fetches region data from Redis and converts them into RegionPoly
     objects suitable for spatial operations. Each region includes geographic
     boundaries and metadata needed for point-in-polygon testing and other
     spatial calculations in mining operations.
 
     This function is typically used to:
-    - Load all dump zones for geofencing calculations
-    - Determine if trucks are within authorized dumping areas
-    - Calculate distances to nearest dump regions
-    - Validate dump operations against defined boundaries
+    - Load all zones for geofencing calculations
+    - Determine if trucks are within authorized areas
+    - Calculate distances to nearest regions
+    - Validate operations against defined boundaries
 
     Args:
         redis_conn: Active Redis data access object for retrieving region
@@ -537,16 +582,16 @@ def get_all_dump_regions(
 
     Returns:
         Optional[List[RegionPoly]]: List of RegionPoly objects representing
-                                   all dump regions for the specified site.
-                                   Returns None if no dump regions exist or
+                                   all regions for the specified site.
+                                   Returns None if no regions exist or
                                    if Redis operations fail.
 
         Each RegionPoly contains:
-        - region_guid: Unique identifier for the dump region
-        - name: Human-readable name of the dump area
+        - region_guid: Unique identifier for the region
+        - name: Human-readable name of the area
         - region_points: Coordinate string for polygon boundary
-        - dump_site: Set to True (these are dump regions)
-        - load_site: Set to False (not loading areas)
+        - dump_site: True or False (these are dump regions)
+        - load_site: True or False (these are load regions)
 
     Raises:
         RedisConnectionError: If Redis operations fail during data retrieval.
@@ -555,20 +600,21 @@ def get_all_dump_regions(
     Example:
         >>> from models.dao.redis_source_dao import RedisSourceDAO
         >>>
-        >>> # Get all dump regions for a site
+        >>> # Get all regions for a site
         >>> redis_dao = RedisSourceDAO()
         >>> site_id = "90f2edf4-72d7-4991-a9a8-f63b5efc7afb"
-        >>> dump_regions = get_all_dump_regions(redis_dao, site_id)
+        >>> region_type = "load"
+        >>> load_regions = get_all_regions(redis_dao, site_id, region_type)
         >>>
-        >>> if dump_regions:
-        ...     print(f"Found {len(dump_regions)} dump regions")
-        ...     for region in dump_regions:
+        >>> if load_regions:
+        ...     print(f"Found {len(load_regions)} regions")
+        ...     for region in load_regions:
         ...         polygon = region.get_polygon()
         ...         if polygon and polygon.is_valid:
         ...             print(f"Region {region.name}: "
         ...                   f"Area = {polygon.area} sq units")
         ... else:
-        ...     print("No dump regions found")
+        ...     print(f"No {region_type} regions found")
 
     Performance Considerations:
         - Redis query is performed once for all regions
@@ -581,17 +627,22 @@ def get_all_dump_regions(
         - Empty region_points are allowed (polygon parsing fails later)
         - Site must exist in Redis or None is returned
     """
+    if region_type not in ["dump", "load"]:
+        logger.error(
+            f"get_all_regions() - region_type of {region_type} is unknown!"
+        )
+        return None
     try:
         # Retrieve dump regions from Redis
-        regions = redis_conn.get_site_regions(site_guid, "dump")
+        raw_regions = redis_conn.get_site_regions(site_guid, region_type)
 
-        if not regions:
+        if not raw_regions:
             return None
 
         # Convert to RegionPoly objects
-        dump_regions = []
+        regions = []
 
-        for region_data in regions:
+        for region_data in raw_regions:
             # Validate required fields
             region_guid = region_data.get("region_guid")
             if not region_guid:
@@ -601,24 +652,25 @@ def get_all_dump_regions(
                 )
                 continue
 
-            # Create RegionPoly with dump-specific settings
+            # Create RegionPoly with region-specific settings
             region_poly = RegionPoly(
                 region_guid=region_guid,
-                site_guid=site_guid,  # Add site context
+                site_guid=site_guid,
                 name=region_data.get("region_name"),
                 region_points=region_data.get("region_points"),
-                region_type="dump",  # Explicit type
-                load_site=False,
-                dump_site=True
+                region_type=region_type,
+                load_site=True if region_type == "load" else False,
+                dump_site=True if region_type == "dump" else False
             )
 
-            dump_regions.append(region_poly)
+            regions.append(region_poly)
 
-        return dump_regions if dump_regions else None
+        return regions if regions else None
 
     except Exception as e:
         logger.error(
-            "Unexpected error loading dump regions for site %s: %s",
+            "Unexpected error loading %s regions for site %s: %s",
+            region_type,
             site_guid,
             str(e)
         )
@@ -709,8 +761,230 @@ def is_asset_within_dump_region(
     return None
 
 
+def get_nearest_load_region(
+    asset_location: List[float],
+    list_of_load_regions: List[RegionPoly]
+) -> Tuple[Optional[RegionPoly], bool, Optional[float]]:
+    """
+    Find the nearest load region to an asset and determine containment status.
+
+    Analyzes the spatial relationship between an asset's current position and
+    all available load regions within a mining site. The function performs two
+    key operations: checks if the asset is within any load region boundary,
+    and calculates the distance to the nearest load region when the asset is
+    outside all regions.
+
+    This function is essential for:
+    - Optimizing truck routing to the nearest available loading zone
+    - Detecting when assets enter load regions for cycle state transitions
+    - Calculating travel distances for productivity metrics
+    - Supporting geofencing alerts when approaching load zones
+
+    Algorithm Overview:
+        1. Validates input parameters and coordinates
+        2. Creates a Shapely Point from asset coordinates
+        3. Checks intersection with all load region polygons
+        4. If outside all regions, calculates distance to each polygon
+        5. Returns the nearest region with containment and distance info
+
+    Args:
+        asset_location: Geographic coordinates as [latitude, longitude] in
+                       decimal degrees. Must be valid WGS84 coordinates with
+                       latitude in range [-90, 90] and longitude in range
+                       [-180, 180].
+        list_of_load_regions: Collection of RegionPoly objects representing
+                            all load zones in the current site. Each region
+                            must have valid polygon geometry for spatial
+                            calculations.
+
+    Returns:
+        Tuple[Optional[RegionPoly], bool, Optional[float]]: A tuple containing
+            three elements:
+
+            1. RegionPoly or None: The load region that either contains the
+               asset or is nearest to it. Returns None only if no valid
+               regions are provided or coordinate parsing fails.
+
+            2. bool: True if the asset_location is within any load region
+               boundary (point-in-polygon test passes), False if the asset
+               is outside all load regions.
+
+            3. float or None: Distance in meters from the asset to the nearest
+               load region boundary. Returns None when is_in_load_region is
+               True (distance is effectively zero when inside). Returns the
+               minimum distance to the nearest polygon edge when outside all
+               regions.
+
+    Raises:
+        No exceptions are raised directly. All errors are logged and the
+        function returns (None, False, None) for invalid inputs.
+
+    Example:
+        >>> # Asset inside a load region
+        >>> asset_pos = [40.7128, -74.0060]  # NYC coordinates
+        >>> regions = get_all_regions(redis_conn, site_id, "load")
+        >>> nearest, is_inside, distance = get_nearest_load_region(
+        ...     asset_pos, regions
+        ... )
+        >>> if nearest and is_inside:
+        ...     print(f"Asset in load region: {nearest.name}")
+        ... elif nearest:
+        ...     print(f"Nearest load region: {nearest.name}, "
+        ...           f"Distance: {distance:.2f}m")
+
+        >>> # Asset outside all load regions
+        >>> asset_pos = [40.7589, -73.9851]  # Times Square
+        >>> nearest, is_inside, distance = get_nearest_load_region(
+        ...     asset_pos, regions
+        ... )
+        >>> if nearest and not is_inside:
+        ...     print(f"Travel {distance:.2f}m to {nearest.name}")
+
+    Performance Considerations:
+        - Early return when asset is found within a region (O(n) worst case)
+        - Distance calculations only performed when outside all regions
+        - Polygon caching in RegionPoly reduces repeated parsing overhead
+        - For sites with many regions (>50), consider spatial indexing
+
+    Geometric Calculations:
+        - Point-in-polygon: Uses Shapely's intersects() method which handles
+          edge cases like points on boundaries
+        - Distance: Calculated using Shapely's distance() method which finds
+          the minimum distance from point to polygon boundary
+        - Conversion: Shapely distance is in degrees, converted to meters
+          using Haversine approximation (111,320 meters per degree latitude)
+
+    Note:
+        - Coordinates must be in longitude/latitude order for Shapely Point
+        - Invalid polygons are skipped with warning logs
+        - Distance calculation assumes flat earth approximation for small
+          regions (acceptable for mining site scales)
+        - Returns the first containing region found, not necessarily the
+          one with the smallest area or best fit
+    """
+    if not list_of_load_regions:
+        logger.debug(
+            "get_nearest_load_region: region_list is empty or None."
+        )
+        return None, False, None
+
+    if not asset_location or len(asset_location) < 2:
+        logger.debug(
+            "get_nearest_load_region: asset_location is invalid."
+        )
+        return None, False, None
+
+    latitude = asset_location[0]
+    longitude = asset_location[1]
+
+    if latitude is None or longitude is None:
+        logger.debug(
+            "get_nearest_load_region: latitude or longitude is None."
+        )
+        return None, False, None
+
+    if latitude == longitude:
+        logger.debug(
+            f"get_nearest_load_region: Latitude and longitude are equal "
+            f"({latitude}), skipping calculation process."
+        )
+        return None, False, None
+
+    try:
+        asset_point = ShapelyPoint(longitude, latitude)
+    except Exception as point_error:
+        logger.error(
+            f"Error creating ShapelyPoint for coordinates "
+            f"Lat: {latitude}, Lon: {longitude} - Error: {point_error}\n"
+            f"Trace: {get_stack_trace_py(point_error)}"
+        )
+        return None, False, None
+
+    # First pass: Check if asset is within any load region
+    for load_region in list_of_load_regions:
+        if load_region is None:
+            continue
+
+        region_poly = load_region.get_polygon()
+        if region_poly is None:
+            error_msg = getattr(
+                load_region, "_parse_error_message", "Unknown"
+            )
+            logger.error(
+                f"Skipping Region GUID {load_region.region_guid} for point "
+                f"({longitude},{latitude}) as its polygon could not be "
+                f"obtained. Reason: {error_msg}"
+            )
+            continue
+
+        try:
+            if region_poly.intersects(asset_point):
+                logger.debug(
+                    f"Asset within load region {load_region.region_guid}"
+                )
+                return load_region, True, None
+        except Exception as intersect_error:
+            logger.error(
+                f"Error in get_nearest_load_region during intersect check "
+                f"for Region GUID: {load_region.region_guid}, "
+                f"SiteGuid: {load_region.site_guid}, "
+                f"Lat: {latitude}, Lon: {longitude} - "
+                f"Error: {intersect_error}\n"
+                f"Trace: {get_stack_trace_py(intersect_error)}"
+            )
+
+    # Second pass: Asset is outside all regions, find nearest one
+    nearest_region = None
+    min_distance = float('inf')
+
+    for load_region in list_of_load_regions:
+        if load_region is None:
+            continue
+
+        region_poly = load_region.get_polygon()
+        if region_poly is None:
+            continue  # Already logged in first pass
+
+        try:
+            # Calculate distance from point to polygon boundary
+            distance_degrees = asset_point.distance(region_poly)
+
+            # Convert degrees to meters (approximate)
+            # 1 degree latitude ≈ 111,320 meters
+            # For longitude, it varies by latitude, but we'll use a
+            # simplified conversion for mining site scales
+            distance_meters = distance_degrees * 111320
+
+            if distance_meters < min_distance:
+                min_distance = distance_meters
+                nearest_region = load_region
+
+        except Exception as distance_error:
+            logger.error(
+                f"Error calculating distance to Region GUID: "
+                f"{load_region.region_guid}, SiteGuid: {load_region.site_guid}, "
+                f"Lat: {latitude}, Lon: {longitude} - "
+                f"Error: {distance_error}\n"
+                f"Trace: {get_stack_trace_py(distance_error)}"
+            )
+
+    if nearest_region:
+        logger.debug(
+            f"Nearest load region: {nearest_region.region_guid}, "
+            f"Distance: {min_distance:.2f} meters"
+        )
+        return nearest_region, False, min_distance
+
+    # No valid regions found
+    logger.warning(
+        "get_nearest_load_region: No valid load regions could be processed."
+    )
+    return None, False, None
+
+
 def record_initialization(
-    current_record: RealtimeRecord
+    current_record: RealtimeRecord,
+    start_cycle_number: Optional[int]
 ) -> CycleRecord:
     """Initialize a new CycleRecord with default values and provided data.
 
@@ -741,10 +1015,12 @@ def record_initialization(
     """
     init_record_const = {
         "asset_guid": current_record.asset_guid,
-        "cycle_number": 1,
+        "cycle_number": start_cycle_number if start_cycle_number else 1,
         "cycle_status": "INPROGRESS",
         "current_process_date": current_record.timestamp,
         "current_area": current_record.current_area,
+        "current_asset_longitude": current_record.longitude,
+        "current_asset_latitude": current_record.latitude,
         "site_guid": current_record.site_guid,
         "current_segment": None,
         "previous_work_state_id": None,
@@ -752,11 +1028,21 @@ def record_initialization(
         "loader_asset_guid": None,
         "loader_latitude": None,
         "loader_longitude": None,
+        "load_region_guid": None,
+        "is_within_load_region": False,
+        "asset_load_region_distance": None,
         "previous_loader_distance": None,
         "current_loader_distance": None,
         "idle_in_dump_region_guid": None,
+        "tmp_idle_near_loader": None,
         "dump_region_guid": None,
+        "outlier_type_id": None,
         "all_assets_in_same_dump_area": False,
+        "outlier_date_utc": None,
+        "outlier_loader_guid": None,
+        "outlier_loader_latitude": None,
+        "outlier_loader_longitude": None,
+        "outlier_dump_region_guid": None,
         "is_outlier": False,
         "outlier_position_latitude": None,
         "outlier_position_longitude": None,

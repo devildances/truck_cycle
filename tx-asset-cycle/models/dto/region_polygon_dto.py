@@ -243,7 +243,8 @@ class RegionPoly:
                 except AttributeError:
                     pass
                 logger.warning(
-                    f"Region {self.region_guid}: Constructed polygon is invalid "
+                    f"{self.region_type.upper()} region {self.region_guid}: "
+                    "Constructed polygon is invalid "
                     f"according to Shapely. Reason: {reason}. Operations might "
                     f"still work or yield unexpected results."
                 )

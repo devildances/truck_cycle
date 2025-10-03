@@ -248,8 +248,6 @@ class TravelingAreaHandler(CycleStateHandler):
             })
 
         logger.warning(
-            f"[CORE WARNING] {curr_rec.asset_guid} "
-            f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
             f"Marking cycle {last_rec.cycle_number} as OUTLIER: "
             f"Idle for too long in {last_rec.current_segment} segment "
             f"at position ({curr_rec.latitude}, {curr_rec.longitude})"
@@ -297,9 +295,7 @@ class TravelingAreaHandler(CycleStateHandler):
             )
 
             logger.debug(
-                f"[CORE DEBUG] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "State transition WORKING->IDLING in travel area "
+                f"State transition WORKING->IDLING in travel area "
                 f"for cycle {last_rec.cycle_number}"
             )
 
@@ -346,9 +342,7 @@ class TravelingAreaHandler(CycleStateHandler):
                     )
 
                 logger.debug(
-                    f"[CORE DEBUG] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "State transition IDLING->WORKING in travel area "
+                    f"State transition IDLING->WORKING in travel area "
                     f"for cycle {last_rec.cycle_number}"
                 )
 
@@ -410,7 +404,7 @@ class TravelingAreaHandler(CycleStateHandler):
         new_cycle_rec = CycleRecord(**new_params)
 
         return updated_rec, new_cycle_rec
-
+    
     def _handle_cycle_completion(
         self: Self,
         context: CycleComparisonContext,
@@ -496,7 +490,7 @@ class TravelingAreaHandler(CycleStateHandler):
                     "current_loader_distance": None,
                     "cycle_start_utc": last_rec.current_process_date,
                 })
-
+            
             elif last_rec.current_area == "TRAVEL":
                 new_params.update({
                     "current_segment": None,
@@ -513,7 +507,7 @@ class TravelingAreaHandler(CycleStateHandler):
         else:
             updated_rec = CycleRecord(**base_params)
             return updated_rec, None
-
+        
     def _handle_dump_completion(
         self: Self,
         context: CycleComparisonContext,
@@ -574,5 +568,5 @@ class TravelingAreaHandler(CycleStateHandler):
                     f.write(f"[LOCAL DEBUG] | CYCLE {last_rec.cycle_number} | {curr_rec.timestamp} [{curr_rec.latitude}, {curr_rec.longitude}] | traveling_area_handler.py #549 | ADD DUMP SECONDS VALUE {dump_seconds}s | PREVIOUS SEGMENT IS {last_rec.current_segment}\n")
 
         updated_rec = CycleRecord(**base_params)
-
+        
         return updated_rec, None

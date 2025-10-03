@@ -12,11 +12,12 @@ from amazon_kclpy.messages import (InitializeInput, LeaseLostInput,
                                    ShutdownRequestedInput)
 from amazon_kclpy.v3 import processor
 
+from config.static_config import CYCLE_SERVICE_TYPES
 from models.dao.pgsql_action_dao import PgsqlActionDAO
 from models.dao.redis_source_dao import RedisSourceDAO
 
-from .load_realtime_phase import load_process as lp_realtime
-from .transform_realtime_phase import process_new_record as pnr_realtime
+from .load_phase import load_process
+from .transform_phase import process_new_record
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +154,9 @@ class RecordProcessor(processor.RecordProcessorBase):
                 )
                 break
             except Exception as e:
-                logger.error(
+                self.log(
                     "[INIT_ERROR] Failed to initialize DAO resources "
-                    f"for shard {initialize_input.shard_id}: {e}", exc_info=True
+                    f"for shard {initialize_input.shard_id}: {e}"
                 )
                 retry_time += 1
                 if retry_time == self.max_retries:
@@ -295,40 +296,42 @@ class RecordProcessor(processor.RecordProcessorBase):
             return
 
         TX_TYPE = os.getenv("TX_TYPE")
-        if TX_TYPE == "realtime":
+        if TX_TYPE in CYCLE_SERVICE_TYPES:
             (
                 initial_record,
                 latest_record_updated,
                 new_cycle_record,
                 process_info_record,
-            ) = pnr_realtime(
+            ) = process_new_record(
                 pgsql_db_conn_obj=self.pgsql_dao,
                 redis_db_conn_obj=self.redis_dao,
-                current_record_data=data
+                current_record_data=data,
+                service_type=TX_TYPE
             )
-            lp_realtime(
+            load_process(
                 pgsql_conn=self.pgsql_dao,
+                service_type=TX_TYPE,
                 initial_cycle_record=initial_record,
                 last_cycle_record_updated=latest_record_updated,
                 new_cycle_record=new_cycle_record,
                 process_info_record=process_info_record
+            )
+            logger.info(
+                "Record (Partition Key: {pk}, "
+                "Sequence Number: {seq}, "
+                "Subsequence Number: {sseq}, "
+                "Data Size: {ds}\n".format(
+                    pk=partition_key,
+                    seq=sequence_number,
+                    sseq=sub_sequence_number,
+                    ds=len(data)
+                )
             )
         else:
             raise ValueError(
                 f"This {TX_TYPE} is unknown for tx-asset-cycle type."
             )
         ####################################
-        self.log(
-            "Record (Partition Key: {pk}, "
-            "Sequence Number: {seq}, "
-            "Subsequence Number: {sseq}, "
-            "Data Size: {ds}".format(
-                pk=partition_key,
-                seq=sequence_number,
-                sseq=sub_sequence_number,
-                ds=len(data)
-            )
-        )
 
     def should_update_sequence(
         self: Self, sequence_number: int, sub_sequence_number: int
@@ -437,7 +440,7 @@ class RecordProcessor(processor.RecordProcessorBase):
 
                     # Skip empty records
                     if not dcd_data:
-                        logger.error("Skipping empty record after decode")
+                        self.log("Skipping empty record after decode")
                         skipped_count += 1
                         continue
 
@@ -445,7 +448,7 @@ class RecordProcessor(processor.RecordProcessorBase):
                     try:
                         parsed_data = json.loads(dcd_data)
                     except json.JSONDecodeError as e:
-                        logger.error(
+                        self.log(
                             f"Failed to parse JSON: {e}, "
                             f"data: '{dcd_data[:100]}'"
                         )
@@ -453,23 +456,23 @@ class RecordProcessor(processor.RecordProcessorBase):
                         continue
 
                     if parsed_data is None:
-                        logger.error("Skipping null JSON data")
+                        self.log("Skipping null JSON data")
                         skipped_count += 1
                         continue
 
                     elif isinstance(parsed_data, dict):
                         if len(parsed_data) > 0:
                             self.process_record(
-                                json.loads(dcd_data), key, seq, sub_seq
+                                parsed_data, key, seq, sub_seq
                             )
                         else:
-                            logger.error("Skipping empty JSON object")
+                            self.log("Skipping empty JSON object")
                             skipped_count += 1
                             continue
 
                     elif isinstance(parsed_data, list):
                         if len(parsed_data) == 0:
-                            logger.error("Skipping empty JSON array")
+                            self.log("Skipping empty JSON array")
                             skipped_count += 1
                             continue
                         else:
@@ -477,10 +480,10 @@ class RecordProcessor(processor.RecordProcessorBase):
                             for i, item in enumerate(parsed_data):
                                 if isinstance(item, dict) and len(item) > 0:
                                     self.process_record(
-                                        json.loads(dcd_data), key, seq, sub_seq
+                                        item, key, seq, sub_seq
                                     )
                                 else:
-                                    logger.error(
+                                    self.log(
                                         f"Skipping invalid list item {i}: "
                                         f"{type(item)}"
                                     )
@@ -495,9 +498,8 @@ class RecordProcessor(processor.RecordProcessorBase):
                         self._largest_seq = (seq, sub_seq)
 
                 except Exception as e:
-                    logger.error(
-                        f"Error processing Kinesis record: {e}",
-                        exc_info=True
+                    self.log(
+                        f"Error processing Kinesis record: {e}"
                     )
                     error_count += 1
                     continue
@@ -538,7 +540,7 @@ class RecordProcessor(processor.RecordProcessorBase):
             is typically required as the framework handles resource
             management.
         """
-        self.log("Lease has been lost")
+        self.log("Lease has been lost\n")
 
     def shard_ended(self: Self, shard_ended_input: ShardEndedInput) -> None:
         """Handle shard completion and perform final checkpoint.
@@ -557,7 +559,7 @@ class RecordProcessor(processor.RecordProcessorBase):
             A final checkpoint is created to mark the shard as completely
             processed, ensuring no data is lost during stream transitions.
         """
-        self.log("Shard has ended checkpointing")
+        self.log("Shard has ended checkpointing\n")
         shard_ended_input.checkpointer.checkpoint()
 
     def shutdown_requested(
@@ -579,5 +581,5 @@ class RecordProcessor(processor.RecordProcessorBase):
             from the correct position when a new processor instance
             starts. This prevents data loss and duplicate processing.
         """
-        self.log("Shutdown has been requested, checkpointing.")
+        self.log("Shutdown has been requested, checkpointing.\n")
         shutdown_requested_input.checkpointer.checkpoint()

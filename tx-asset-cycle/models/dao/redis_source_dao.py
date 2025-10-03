@@ -382,7 +382,7 @@ class RedisSourceDAO(RedisBaseDAO):
             # Process and filter regions
             matching_regions = []
 
-            for region_name, region_data in region_hash.items():
+            for region_guid, region_data in region_hash.items():
                 try:
                     # Deserialize JSON data
                     region_info = json.loads(region_data)
@@ -394,33 +394,38 @@ class RedisSourceDAO(RedisBaseDAO):
                         # Case-insensitive comparison
                         if region_type_value.lower() == region_type.lower():
                             # Extract points if available
-                            points = region_info.get("points")
-                            region_guid = region_info.get("region_guid")
-                            region_name = region_info.get("region_name")
-                            if points and region_guid:
+                            reg_points = region_info.get("points")
+                            reg_guid = region_info.get("region_guid")
+                            reg_name = region_info.get("region_name")
+                            if reg_points and reg_guid:
                                 matching_regions.append(
                                     {
-                                        "region_guid": region_guid,
-                                        "region_name": region_name,
-                                        "region_points": points
+                                        "region_guid": reg_guid,
+                                        "region_name": reg_name,
+                                        "region_points": reg_points
                                     }
                                 )
                             else:
                                 logger.warning(
-                                    f"Region '{region_name}' of type "
-                                    f"'{region_type}' has no points data "
+                                    f"Region '{reg_guid}' of type "
+                                    f"'{region_type_value}' has no points data "
                                     f"or guid info"
                                 )
+                    else:
+                        logger.warning(
+                            f"Region '{region_guid}' data "
+                            "is not a valid JSON string"
+                        )
 
                 except json.JSONDecodeError as e:
                     logger.error(
-                        f"Failed to parse JSON for region '{region_name}': {e}"
+                        f"Failed to parse JSON for region '{region_guid}': {e}"
                     )
                     continue
                 except Exception as e:
                     logger.error(
                         f"Unexpected error processing region "
-                        f"'{region_name}': {e}"
+                        f"'{region_guid}': {e}"
                     )
                     continue
 

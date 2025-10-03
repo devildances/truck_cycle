@@ -1,5 +1,5 @@
-import json
 import logging
+import json
 from datetime import timedelta
 from typing import Optional, Self, Tuple
 
@@ -281,8 +281,6 @@ class LoadingAreaHandler(CycleStateHandler):
         if last_rec.current_segment is None:
             if loader_rec is None:
                 logger.error(
-                    f"[CORE ERROR] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
                     "Cannot start LOAD_TIME for initial record without "
                     "loader information"
                 )
@@ -374,8 +372,6 @@ class LoadingAreaHandler(CycleStateHandler):
             return self._close_dump_time_cycle(context)
 
         logger.warning(
-            f"[CORE WARNING] {context.current_record.asset_guid} "
-            f"{context.current_record.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
             f"Unexpected segment {segment} when closing cycle "
             f"{last_rec.cycle_number}"
         )
@@ -525,8 +521,6 @@ class LoadingAreaHandler(CycleStateHandler):
                 missing_segments.append("dump_seconds")
 
             logger.warning(
-                f"[CORE WARNING] {context.current_record.asset_guid} "
-                f"{context.current_record.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
                 f"Closing INVALID cycle {last_rec.cycle_number}: "
                 f"Missing segments: {', '.join(missing_segments)}"
             )
@@ -655,9 +649,7 @@ class LoadingAreaHandler(CycleStateHandler):
             })
 
             logger.debug(
-                f"[CORE DEBUG] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "State transition WORKING->IDLING for cycle "
+                f"State transition WORKING->IDLING for cycle "
                 f"{last_rec.cycle_number}"
             )
 
@@ -683,7 +675,7 @@ class LoadingAreaHandler(CycleStateHandler):
 
             if last_rec.current_segment == CycleSegment.DUMP_TIME.value:
                 return self._handle_implied_dump_completion(context)
-
+                    
             # Check for implied loading completion
             elif idle_duration > IDLE_THRESHOLD_FOR_START_LOAD:
                 # Determine if we should handle implied loading
@@ -712,9 +704,7 @@ class LoadingAreaHandler(CycleStateHandler):
 
                 if should_handle_implied:
                     logger.debug(
-                        f"[CORE DEBUG] {curr_rec.asset_guid} "
-                        f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                        "Detected implied loading: truck was idle for "
+                        f"Detected implied loading: truck was idle for "
                         f"{idle_duration:.1f}s (threshold: "
                         f"{IDLE_THRESHOLD_FOR_START_LOAD}s) and is now moving"
                     )
@@ -731,9 +721,7 @@ class LoadingAreaHandler(CycleStateHandler):
                 )
 
                 logger.debug(
-                    f"[CORE DEBUG] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "State transition IDLING->WORKING for initial "
+                    f"State transition IDLING->WORKING for initial "
                     f"record (cycle {last_rec.cycle_number})"
                 )
 
@@ -771,9 +759,7 @@ class LoadingAreaHandler(CycleStateHandler):
                     f.write(f"[LOCAL DEBUG] | CYCLE {last_rec.cycle_number} | {curr_rec.timestamp} [{curr_rec.latitude}, {curr_rec.longitude}] | loading_area_handler.py #715 | ADD LOAD SECONDS VALUE {load_seconds}s | PREVIOUS SEGMENT IS {last_rec.current_segment}\n")
 
                 logger.debug(
-                    f"[CORE DEBUG] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "Completing LOAD_TIME for cycle "
+                    f"Completing LOAD_TIME for cycle "
                     f"{last_rec.cycle_number}: Load duration "
                     f"{load_seconds:.1f}s, transitioning to LOAD_TRAVEL"
                 )
@@ -788,9 +774,7 @@ class LoadingAreaHandler(CycleStateHandler):
                 )
 
                 logger.debug(
-                    f"[CORE DEBUG] {curr_rec.asset_guid} "
-                    f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                    "State transition IDLING->WORKING for cycle "
+                    f"State transition IDLING->WORKING for cycle "
                     f"{last_rec.cycle_number} in segment "
                     f"{last_rec.current_segment}"
                 )
@@ -1004,9 +988,7 @@ class LoadingAreaHandler(CycleStateHandler):
                 f.write(f"[LOCAL DEBUG] | CYCLE {last_rec.cycle_number} | {curr_rec.timestamp} [{curr_rec.latitude}, {curr_rec.longitude}] | loading_area_handler.py #932 | ADD LOAD SECONDS VALUE {idle_duration}s | PREVIOUS SEGMENT IS {last_rec.current_segment}\n")
 
             logger.debug(
-                f"[CORE DEBUG] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "Implied LOAD_TIME completion for initial record: "
+                f"Implied LOAD_TIME completion for initial record: "
                 f"Truck was idle {idle_duration:.1f}s at loader "
                 f"{loader_rec.asset_guid} and is now in LOAD_TRAVEL"
             )
@@ -1090,8 +1072,6 @@ class LoadingAreaHandler(CycleStateHandler):
             new_cycle_rec = CycleRecord(**new_params)
 
             logger.debug(
-                f"[CORE DEBUG] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
                 f"Closed {cycle_status} cycle {updated_rec.cycle_number} "
                 f"and started cycle {new_cycle_rec.cycle_number} with "
                 f"implied loading ({idle_duration:.1f}s)"
@@ -1176,9 +1156,7 @@ class LoadingAreaHandler(CycleStateHandler):
                             f.write(f"[LOCAL DEBUG] | CYCLE {last_rec.cycle_number} | {curr_rec.timestamp} [{curr_rec.latitude}, {curr_rec.longitude}] | loading_area_handler.py #1099 | ADD LOAD SECONDS VALUE {total_load_seconds}s | PREVIOUS SEGMENT IS {last_rec.current_segment}\n")
 
                         logger.debug(
-                            f"[CORE DEBUG] {curr_rec.asset_guid} "
-                            f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                            "Continued loading at same loader for cycle "
+                            f"Continued loading at same loader for cycle "
                             f"{last_rec.cycle_number}: Additional "
                             f"{idle_duration:.1f}s, total load time "
                             f"{total_load_seconds:.1f}s"
@@ -1189,8 +1167,6 @@ class LoadingAreaHandler(CycleStateHandler):
                     else:
                         # Different loader - log warning
                         logger.warning(
-                            f"[CORE WARNING] {curr_rec.asset_guid} "
-                            f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
                             f"In current record {curr_rec.timestamp}, "
                             "truck in LOAD_TRAVEL moved to different loader "
                             f"({loader_dist_change:.1f}m away) for cycle "
@@ -1199,11 +1175,9 @@ class LoadingAreaHandler(CycleStateHandler):
                 else:
                     # No previous loader coordinates - log warning
                     logger.warning(
-                        f"[CORE WARNING] {curr_rec.asset_guid} "
-                        f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                        "Cannot verify same loader for LOAD_TRAVEL continuation "
+                        f"Cannot verify same loader for LOAD_TRAVEL continuation "
                         f"in cycle {last_rec.cycle_number}: missing previous "
-                        "loader coordinates or the loader is not the same"
+                        f"loader coordinates or the loader is not the same"
                     )
 
                 # Fall through to default handling
@@ -1218,9 +1192,7 @@ class LoadingAreaHandler(CycleStateHandler):
             # This should not happen due to geographic constraints but
             # handle gracefully for defensive programming
             logger.warning(
-                f"[CORE WARNING] {curr_rec.asset_guid} "
-                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
-                "Unexpected implied loading from segment "
+                f"Unexpected implied loading from segment "
                 f"{last_rec.current_segment} at loading area for cycle "
                 f"{last_rec.cycle_number}. Only updating work state."
             )
@@ -1238,16 +1210,16 @@ class LoadingAreaHandler(CycleStateHandler):
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
         last_rec = context.last_record
         curr_rec = context.current_record
-
+        
         base_params = self.factory.create_base_params(
             last_rec, curr_rec
         )
-
+        
         base_params.update({
             "current_segment": CycleSegment.EMPTY_TRAVEL.value,
             "idle_in_dump_region_guid": None,
         })
-
+        
         idle_when_dump = self.calculator.calculate_idle_duration(
             previous_process_date=last_rec.dump_start_utc,
             current_process_date=curr_rec.timestamp

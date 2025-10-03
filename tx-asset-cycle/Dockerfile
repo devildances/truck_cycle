@@ -117,6 +117,9 @@ ENV PYTHONUNBUFFERED=1 \
     REDIS_CREDENTIALS_SECRET_NAME=$REDIS_CREDENTIALS_SECRET_NAME \
     AWS_REGION=$AWS_REGION \
     TX_TYPE=$TX_TYPE \
+    PYTHON_LOG_LEVEL=WARN \
+    JAVA_LOG_LEVEL=WARN \
+    KCL_LOG_LEVEL=WARN \
     OTEL_RESOURCE_ATTRIBUTES=service.name="tx-asset-cycle-vlx"
 
 # Create non-root user
@@ -144,7 +147,7 @@ RUN ln -sf /usr/local/bin/python3.12 /usr/bin/python3 && \
 USER appuser
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=60s --timeout=15s --start-period=75s --retries=3 \
     CMD ["python", "/usr/src/app/utils/healthcheck.py"]
 
 # Entry point

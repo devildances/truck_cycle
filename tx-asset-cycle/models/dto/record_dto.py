@@ -6,6 +6,7 @@ from typing import Any, ClassVar, List, Optional, Self, Tuple, Type, TypeVar
 from psycopg2 import sql
 
 from config.postgresql_config import (DX_SCHEMA_NAME,
+                                      PGSQL_ASSET_CYCLE_REPRO_TMP_TABLE_NAME,
                                       PGSQL_ASSET_CYCLE_TABLE_NAME,
                                       PGSQL_ASSET_CYCLE_TMP_TABLE_NAME,
                                       PGSQL_CHECKPOINT_TABLE_NAME)
@@ -84,9 +85,12 @@ class BaseRecord(ABC):
     """
 
     # These must be defined by subclasses
+    RECORD_TYPE: ClassVar[str]
     DB_PRIMARY_KEY_FIELD: ClassVar[str]
+    REPRO_TABLE_NAME: ClassVar[str]
     TABLE_NAME: ClassVar[str]
     SCHEMA_NAME: ClassVar[str]
+    SERVICE_TYPE: ClassVar[str]
 
     def is_new_record(self: Self) -> bool:
         """Check if this is a new record without a database primary key.
@@ -135,8 +139,7 @@ class BaseRecord(ABC):
             and not f.name.isupper()  # Exclude class variables
         ]
 
-    @classmethod
-    def generate_insert_query(cls: Type[T]) -> sql.SQL:
+    def generate_insert_query(self: Self) -> sql.SQL:
         """Generate a safe parameterized INSERT query.
 
         Creates a PostgreSQL INSERT statement using psycopg2.sql for
@@ -155,11 +158,19 @@ class BaseRecord(ABC):
             VALUES (%s, %s);
         """
         columns = sql.SQL(", ").join(
-            [sql.Identifier(col) for col in cls.get_column_names()]
+            [sql.Identifier(col) for col in self.get_column_names()]
         )
         placeholders = sql.SQL(", ").join(
-            [sql.SQL("%s") for _ in cls.get_column_names()]
+            [sql.SQL("%s") for _ in self.get_column_names()]
         )
+
+        if self.RECORD_TYPE == "cycle":
+            if self.SERVICE_TYPE == "realtime":
+                target_table = self.TABLE_NAME
+            elif self.SERVICE_TYPE == "reprocess":
+                target_table = self.REPRO_TABLE_NAME
+        else:
+            target_table = self.TABLE_NAME
 
         insert_query = sql.SQL(
             """
@@ -167,8 +178,8 @@ class BaseRecord(ABC):
             VALUES ({placeholders});
             """
         ).format(
-            schema=sql.Identifier(cls.SCHEMA_NAME),
-            table=sql.Identifier(cls.TABLE_NAME),
+            schema=sql.Identifier(self.SCHEMA_NAME),
+            table=sql.Identifier(target_table),
             columns=columns,
             placeholders=placeholders
         )
@@ -203,8 +214,7 @@ class BaseRecord(ABC):
         )
         return data_to_insert
 
-    @classmethod
-    def generate_update_query(cls: Type[T]) -> sql.SQL:
+    def generate_update_query(self: Self) -> sql.SQL:
         """Generate a safe parameterized UPDATE query.
 
         Creates a PostgreSQL UPDATE statement using psycopg2.sql for
@@ -223,11 +233,19 @@ class BaseRecord(ABC):
             SET "name" = %s, "created_date" = %s
             WHERE "id" = %s;
         """
-        columns = cls.get_column_names()
+        columns = self.get_column_names()
         set_clause = sql.SQL(", ").join(
             [sql.SQL("{col} = %s").format(col=sql.Identifier(col))
              for col in columns]
         )
+
+        if self.RECORD_TYPE == "cycle":
+            if self.SERVICE_TYPE == "realtime":
+                target_table = self.TABLE_NAME
+            elif self.SERVICE_TYPE == "reprocess":
+                target_table = self.REPRO_TABLE_NAME
+        else:
+            target_table = self.TABLE_NAME
 
         update_query = sql.SQL(
             """
@@ -236,10 +254,10 @@ class BaseRecord(ABC):
             WHERE {pk} = %s;
             """
         ).format(
-            schema=sql.Identifier(cls.SCHEMA_NAME),
-            table=sql.Identifier(cls.TABLE_NAME),
+            schema=sql.Identifier(self.SCHEMA_NAME),
+            table=sql.Identifier(target_table),
             set_clause=set_clause,
-            pk=sql.Identifier(cls.DB_PRIMARY_KEY_FIELD)
+            pk=sql.Identifier(self.DB_PRIMARY_KEY_FIELD)
         )
 
         return update_query
@@ -363,10 +381,15 @@ class CycleRecord(BaseRecord):
     updated_date: datetime
 
     # Class configuration
+    RECORD_TYPE: ClassVar[str] = "cycle"
     DB_PRIMARY_KEY_FIELD: ClassVar[str] = 'asset_cycle_vlx_id'
+    REPRO_TABLE_NAME: ClassVar[str] = PGSQL_ASSET_CYCLE_REPRO_TMP_TABLE_NAME
     TABLE_NAME: ClassVar[str] = PGSQL_ASSET_CYCLE_TMP_TABLE_NAME
     FINAL_TABLE_NAME: ClassVar[str] = PGSQL_ASSET_CYCLE_TABLE_NAME
     SCHEMA_NAME: ClassVar[str] = DX_SCHEMA_NAME
+
+    # Type of trigger service
+    SERVICE_TYPE: ClassVar[str] = "realtime"
 
     # Optional fields
     asset_cycle_vlx_id: Optional[int] = field(
@@ -374,15 +397,27 @@ class CycleRecord(BaseRecord):
         metadata={'db_primary_key': True}
     )
     current_segment: Optional[str] = None
+    current_asset_longitude: Optional[float] = None
+    current_asset_latitude: Optional[float] = None
     previous_work_state_id: Optional[int] = None  # 3 if working, 2 if idling
     loader_asset_guid: Optional[str] = None
     loader_latitude: Optional[float] = None
     loader_longitude: Optional[float] = None
+    load_region_guid: Optional[str] = None
+    is_within_load_region: Optional[bool] = None
+    asset_load_region_distance: Optional[float] = None
     previous_loader_distance: Optional[float] = None
     current_loader_distance: Optional[float] = None
     idle_in_dump_region_guid: Optional[str] = None
+    tmp_idle_near_loader: Optional[str] = None
     dump_region_guid: Optional[str] = None
+    outlier_type_id: Optional[int] = None
     all_assets_in_same_dump_area: Optional[bool] = None
+    outlier_date_utc: Optional[datetime] = None
+    outlier_loader_guid: Optional[str] = None
+    outlier_loader_latitude: Optional[float] = None
+    outlier_loader_longitude: Optional[float] = None
+    outlier_dump_region_guid: Optional[str] = None
     is_outlier: Optional[bool] = None
     outlier_position_latitude: Optional[float] = None
     outlier_position_longitude: Optional[float] = None
@@ -396,7 +431,7 @@ class CycleRecord(BaseRecord):
     load_seconds: Optional[float] = None
     total_cycle_seconds: Optional[float] = None
     outlier_seconds: Optional[float] = None
-    cycle_start_utc: Optional[datetime] = None,
+    cycle_start_utc: Optional[datetime] = None
     cycle_end_utc: Optional[datetime] = None
 
     @classmethod
@@ -468,6 +503,7 @@ class ProcessInfoRecord(BaseRecord):
     created_date: datetime
 
     # Class configuration
+    RECORD_TYPE: ClassVar[str] = "info"
     DB_PRIMARY_KEY_FIELD: ClassVar[str] = 'tx_process_info_id'
     TABLE_NAME: ClassVar[str] = PGSQL_CHECKPOINT_TABLE_NAME
     SCHEMA_NAME: ClassVar[str] = DX_SCHEMA_NAME

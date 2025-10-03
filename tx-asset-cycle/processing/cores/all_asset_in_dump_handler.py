@@ -1,11 +1,13 @@
 import logging
 from typing import Optional, Self, Tuple
 
+from config.static_config import IDLE_THRESHOLD_FOR_TRUCK_NEAR_LOADER_IN_DUMP
 from models.dto.method_dto import CycleComparisonContext
 from models.dto.record_dto import CycleRecord
 from utils.utilities import DurationCalculator
 
-from .identifiers import CycleRecordFactory, CycleStateHandler, CycleStatus
+from .identifiers import (CycleRecordFactory, CycleStateHandler, CycleStatus,
+                          WorkState)
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +101,30 @@ class AllAssetsInSameDumpAreaHandler(CycleStateHandler):
             moved to dump areas for maintenance or special operations.
         """
         last_rec = context.last_record
+        curr_rec = context.current_record
+        break_threshold = False
+        idle_duration = 0
+
+        if (
+            last_rec.current_work_state_id == WorkState.IDLING
+            and curr_rec.work_state_id == WorkState.IDLING
+        ) or (
+            last_rec.current_work_state_id == WorkState.IDLING
+            and curr_rec.work_state_id == WorkState.WORKING
+        ):
+            idle_duration = self.calculator.calculate_idle_duration(
+                previous_process_date=last_rec.current_process_date,
+                current_process_date=curr_rec.timestamp
+            )
+
+        if idle_duration >= IDLE_THRESHOLD_FOR_TRUCK_NEAR_LOADER_IN_DUMP:
+            break_threshold = True
 
         # Scenario 1: Assets newly together (False -> True)
         if (
             not last_rec.all_assets_in_same_dump_area
             and context.assets_in_same_location
+            and break_threshold
         ):
             return self._handle_assets_newly_together(context)
 
@@ -114,6 +135,8 @@ class AllAssetsInSameDumpAreaHandler(CycleStateHandler):
         ):
             # No action needed - assets still in same location
             logger.debug(
+                f"[CORE DEBUG] {curr_rec.asset_guid} "
+                f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
                 f"Assets still in same dump area for cycle {last_rec.cycle_number}"
             )
             return None, None
@@ -158,17 +181,29 @@ class AllAssetsInSameDumpAreaHandler(CycleStateHandler):
         """
         last_rec = context.last_record
         curr_rec = context.current_record
+        loader_info = context.loader_asset
+        dump_region = context.dump_region
 
         # Create base parameters
         base_params = self.factory.create_base_params(last_rec, curr_rec)
 
         # Update the flag
         base_params.update({
-            "all_assets_in_same_dump_area": True
+            "outlier_type_id": 1,
+            "all_assets_in_same_dump_area": True,
+            "outlier_date_utc": last_rec.current_process_date,
+            "outlier_loader_guid": loader_info.asset_guid,
+            "outlier_loader_latitude": loader_info.latitude,
+            "outlier_loader_longitude": loader_info.longitude,
+            "outlier_dump_region_guid": dump_region.region_guid,
+            "outlier_position_latitude": last_rec.current_asset_latitude,
+            "outlier_position_longitude": last_rec.current_asset_longitude,
         })
 
         logger.debug(
-            f"Truck and loader entered same dump area for cycle "
+            f"[CORE DEBUG] {curr_rec.asset_guid} "
+            f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
+            "Truck and loader entered same dump area for cycle "
             f"{last_rec.cycle_number}"
         )
 
@@ -220,13 +255,15 @@ class AllAssetsInSameDumpAreaHandler(CycleStateHandler):
 
         base_params.update({
             "cycle_status": cycle_status,
-            "cycle_end_utc": curr_rec.timestamp,
+            "cycle_end_utc": last_rec.current_process_date,
             "all_assets_in_same_dump_area": True
         })
 
         logger.debug(
+            f"[CORE DEBUG] {curr_rec.asset_guid} "
+            f"{curr_rec.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | "
             f"Closing cycle {last_rec.cycle_number}: "
-            f"Truck and loader separated after being in same dump area"
+            "Truck and loader separated after being in same dump area"
         )
 
         updated_rec = CycleRecord(**base_params)
@@ -235,6 +272,9 @@ class AllAssetsInSameDumpAreaHandler(CycleStateHandler):
         new_params = self.factory.create_outlier_recovery_params(
             curr_rec, last_rec
         )
+        new_params.update({
+            "cycle_start_utc": last_rec.current_process_date
+        })
         new_cycle_rec = CycleRecord(**new_params)
 
         logger.info(

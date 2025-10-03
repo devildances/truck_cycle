@@ -1,7 +1,10 @@
 from psycopg2 import sql
 
-from config.postgresql_config import (DX_SCHEMA_NAME, PGSQL_ASSET_TABLE_NAME,
+from config.postgresql_config import (DX_SCHEMA_NAME,
+                                      PGSQL_ASSET_CYCLE_TABLE_NAME,
+                                      PGSQL_ASSET_TABLE_NAME,
                                       PGSQL_CHECKPOINT_TABLE_NAME,
+                                      PGSQL_IDLE_CYCLE_TABLE_NAME,
                                       PGSQL_REGION_TABLE_NAME)
 from config.static_config import LOADER_ASSET_TYPE_GUID
 
@@ -144,18 +147,18 @@ def get_loaders_from_asset_idle_query() -> sql.SQL:
             WHERE
                 v.end_location_latitude IS NOT NULL
                 AND v.end_location_longitude IS NOT NULL
-                AND COALESCE(v.updated_date, v.created_date)
+                AND COALESCE(v.end_state_utc, v.start_state_utc)
                     AT TIME ZONE 'UTC' <= %s
             ORDER BY
                 ai.asset_guid,
-                COALESCE(v.updated_date, v.created_date) DESC
+                COALESCE(v.end_state_utc, v.start_state_utc) DESC
         )
         """
     ).format(
         columns=latest_loc_cte_columns_sql,
         cte=sql.SQL("asset_ids"),
         schema=sql.Identifier(DX_SCHEMA_NAME),
-        idle_tbl=sql.Identifier("asset_idle_vlx"),
+        idle_tbl=sql.Identifier(PGSQL_IDLE_CYCLE_TABLE_NAME),
         arg_join=sql.SQL("v.asset_guid = ai.asset_guid")
     )
 
@@ -173,5 +176,23 @@ def get_loaders_from_asset_idle_query() -> sql.SQL:
     query_parts.append(asset_ids_cte_query)
     query_parts.append(latest_loc_cte_query)
     query_parts.append(main_query)
+
+    return sql.SQL(" ").join(query_parts) + sql.SQL(";")
+
+
+def get_last_cycle_number_asset_query() -> sql.SQL:
+    query_parts = []
+
+    main_cols = ["MAX(cycle_number) AS cycle_number"]
+    main_columns_sql = sql.SQL(", ").join(
+        [sql.SQL(col) for col in main_cols]
+    )
+    main_query = sql.SQL("SELECT {columns} FROM {cycle_table}").format(
+        columns=main_columns_sql,
+        cycle_table=sql.Identifier(PGSQL_ASSET_CYCLE_TABLE_NAME)
+    )
+    query_parts.append(main_query)
+    query_parts.append(sql.SQL("WHERE asset_guid=%s"))
+    query_parts.append(sql.SQL("AND cycle_end_utc AT TIME ZONE 'UTC' <= %s"))
 
     return sql.SQL(" ").join(query_parts) + sql.SQL(";")

@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from glob import glob
 from types import FrameType
@@ -19,6 +20,25 @@ print(
     f"[KCL-HELPER] Starting at {time.strftime('%Y-%m-%d %H:%M:%S')} PID={os.getpid()}",
     flush=True
 )
+
+# TEST THE HEALTHCHECK IMMEDIATELY ON STARTUP
+print("[KCL-HELPER] Testing healthcheck on startup...", flush=True)
+try:
+    healthcheck_result = subprocess.run(
+        ["python3", "/usr/src/app/utils/healthcheck.py"],
+        capture_output=True,
+        text=True,
+        timeout=10
+    )
+    print(f"[KCL-HELPER] Healthcheck exit code: {healthcheck_result.returncode}", flush=True)
+    if healthcheck_result.stdout:
+        print(f"[KCL-HELPER] Healthcheck stdout: {healthcheck_result.stdout}", flush=True)
+    if healthcheck_result.stderr:
+        print(f"[KCL-HELPER] Healthcheck stderr: {healthcheck_result.stderr}", flush=True)
+except subprocess.TimeoutExpired:
+    print("[KCL-HELPER] Healthcheck TIMEOUT after 10 seconds", flush=True)
+except Exception as e:
+    print(f"[KCL-HELPER] Healthcheck failed to run: {e}", flush=True)
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +179,15 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # Validate JAR files exist
+    jar_files = glob(os.path.join(jars_base_dir, '*.jar'))
+    if not jar_files:
+        print(f"[KCL-HELPER] ERROR: No JAR files found in {jars_base_dir}", flush=True)
+        sys.exit(1)
+    print(f"[KCL-HELPER] Found {len(jar_files)} JAR files in classpath", flush=True)
+
     classpath_separator = ';' if os.name == 'nt' else ':'
-    classpath = classpath_separator.join(
-        glob(os.path.join(jars_base_dir, '*.jar'))
-    )
+    classpath = classpath_separator.join(jar_files)
 
     # Main class for the Java KCL MultiLangDaemon
     kcl_main_class = 'software.amazon.kinesis.multilang.MultiLangDaemon'
@@ -179,7 +204,19 @@ def main() -> None:
             flush=True
         )
 
+    # Get KCL log level from environment (default to INFO)
+    kcl_log_level = os.getenv("KCL_LOG_LEVEL", "INFO")
+    print(f"[KCL-HELPER] Setting KCL log level to: {kcl_log_level}", flush=True)
+
     command.extend(java_opts.split())
+    # Add KCL-specific log level override
+    command.append(f"-Dlog4j.logger.software.amazon.kinesis={kcl_log_level}")
+    # Completely disable CloudWatch metrics publishing
+    command.extend([
+        "-Daws.kinesis.metrics.enabled=false",
+        "-Dsoftware.amazon.kinesis.leases.suppressMetricsLogger=true",
+        "-Dcom.amazonaws.sdk.enableDefaultMetrics=false"
+    ])
     command.extend([
         f'-Dlogback.configurationFile={logback_file_path}',
         '-cp',
@@ -200,17 +237,82 @@ def main() -> None:
         flush=True
     )
     print(
-        f"[KCL-HELPER] Asset-Idle service type: {TX_TYPE}",
+        f"[KCL-HELPER] Asset-Cycle service type: {TX_TYPE}",
         flush=True
     )
     sys.stdout.flush()
     sys.stderr.flush()
 
     env = os.environ.copy()
-    process = subprocess.Popen(command, env=env)
 
+    # Start process and capture output
+    process = subprocess.Popen(
+        command,
+        env=env,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        universal_newlines=True
+    )
+
+    # Monitor process startup for 5 seconds
+    print("[KCL-HELPER] Monitoring Java process startup...", flush=True)
+    start_time = time.time()
+
+    while time.time() - start_time < 5:
+        poll_result = process.poll()
+        if poll_result is not None:
+            print(f"[KCL-HELPER] ERROR: Java process died with exit code {poll_result}", flush=True)
+            # Get remaining output
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+                if stderr:
+                    for line in stderr.splitlines():
+                        if line.strip():
+                            print(f"[JAVA STDERR] {line}", flush=True)
+                if stdout:
+                    for line in stdout.splitlines():
+                        if line.strip():
+                            print(f"[JAVA STDOUT] {line}", flush=True)
+            except subprocess.TimeoutExpired:
+                pass
+            sys.exit(1)
+        time.sleep(0.5)
+
+    print("[KCL-HELPER] Java process started successfully, continuing...", flush=True)
+
+    # Create output forwarding threads for real-time log streaming
+    def forward_stdout():
+        try:
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    print(f"[JAVA STDOUT] {line.rstrip()}", flush=True)
+        except:
+            pass
+        finally:
+            if process.stdout and not process.stdout.closed:
+                process.stdout.close()
+
+    def forward_stderr():
+        try:
+            for line in iter(process.stderr.readline, ''):
+                if line:
+                    print(f"[JAVA STDERR] {line.rstrip()}", flush=True)
+        except:
+            pass
+        finally:
+            if process.stderr and not process.stderr.closed:
+                process.stderr.close()
+
+    # Start daemon threads for output forwarding
+    stdout_thread = threading.Thread(target=forward_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=forward_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    # Monitor process with continuous output forwarding
     try:
-        process.wait()
+        while process.poll() is None:
+            time.sleep(1)
         exit_code = process.returncode
     except KeyboardInterrupt:
         print(
