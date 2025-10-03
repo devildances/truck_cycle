@@ -19,44 +19,50 @@ logger = logging.getLogger(__name__)
 
 
 class LoadingAreaHandler(CycleStateHandler):
-    """Handler for loading area cycle logic with implied loading support.
+    """Handler for loading area cycle logic with comprehensive state management.
 
-    Manages cycle state transitions when a haul truck is in the loading
-    area. This includes detecting when loading starts, tracking loading
-    duration, handling transitions to travel segments, and managing
-    implied loading scenarios where trucks complete loading between GPS
-    updates.
+    Manages cycle state transitions when a haul truck is in the loading area,
+    including cycle initialization, loading operations, cycle closures, and
+    special cases like implied loading and dump completion from load areas.
 
-    The handler supports both explicit loading detection (continuous
-    idling) and implied loading detection (extended idle followed by
-    movement), making it robust for sparse GPS data scenarios.
+    The handler supports multiple operational scenarios:
+    1. Normal loading: Explicit loading detection through continuous idling
+    2. Implied loading: Loading that occurred between GPS updates
+    3. Implied dumping: Dump operations completed from load area (DUMP_TIME)
+    4. Outlier detection: Extended idle periods exceeding thresholds
+    5. Cycle management: Closing previous cycles and creating new ones
+    6. Continued loading: Trucks repositioning at same loader
 
     Key Features:
         - Detects loading start based on idle duration thresholds
-        - Handles cycle closure and new cycle creation
+        - Handles cycle closure for multiple segment transitions
         - Supports implied loading for low-frequency GPS updates
-        - Manages both normal and abnormal cycle transitions
-        - Validates required loader information
-        - Handles outlier detection for extended idle periods
+        - Manages implied dumping when DUMP_TIME trucks arrive at load area
+        - Validates loader information and tracks loader positioning
+        - Handles outlier detection with configurable thresholds
+        - Stores loader information in tmp_idle_near_loader for future use
 
     Attributes:
-        factory: CycleRecordFactory instance for creating records
-        calculator: DurationCalculator instance for time calculations
+        factory (CycleRecordFactory): Instance for creating cycle records
+        calculator (DurationCalculator): Instance for time calculations
 
     Business Rules:
         - Truck must idle > IDLE_THRESHOLD_FOR_START_LOAD to start loading
         - Loading completes when truck transitions from IDLING to WORKING
-        - New cycles created after closing previous cycles
-        - Implied loading handles cases where GPS missed loading state
         - Extended idle > IDLE_THRESHOLD_IN_GEOFENCE_AREA marks as outlier
+        - Extended idle > MAX_IDLE_THRESHOLD_TO_CLOSE_STATE triggers special
+          cycle closure with synthetic durations
+        - Implied operations handle GPS gaps and low update frequencies
+        - Same loader validation uses DISTANCE_MAX_FOR_LOADER_MOVEMENT
 
     Example:
         >>> handler = LoadingAreaHandler()
         >>> updated, new = handler.handle(context)
         >>> if updated and new:
-        ...     # Previous cycle closed, new cycle started
-        ...     print(f"Closed cycle {updated.cycle_number}")
-        ...     print(f"Started cycle {new.cycle_number}")
+        ...     print(f"Closed cycle {updated.cycle_number} as {updated.cycle_status}")
+        ...     print(f"Started new cycle {new.cycle_number}")
+        >>> elif updated and updated.current_segment == CycleSegment.LOAD_TRAVEL:
+        ...     print(f"Loading completed, truck now in LOAD_TRAVEL")
     """
 
     def __init__(self: Self) -> None:
@@ -71,23 +77,30 @@ class LoadingAreaHandler(CycleStateHandler):
     def handle(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-        """Handle cycle logic in loading area.
+        """Handle cycle logic in loading area with multiple state patterns.
 
         Processes the cycle comparison context to determine appropriate
-        actions based on the truck's current and previous states. This
-        includes handling trucks moving near loaders, idling at loaders,
-        and state transitions.
+        actions based on the truck's current and previous states. Routes
+        to specific handlers for different operational patterns.
+
+        The method identifies three main patterns:
+        1. Moving near loader: Both states WORKING (no action needed)
+        2. Idling near loader: Both states IDLING (check thresholds)
+        3. State transition: Different states (handle various transitions)
 
         Args:
-            context: Cycle comparison context with current/previous records
+            context (CycleComparisonContext): Contains current/previous records,
+                loader information, and spatial context
 
         Returns:
-            Tuple of (updated_record, new_cycle_record) where either or
-            both can be None
+            Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
+                - (None, None) if no action needed
+                - (updated_record, None) for state updates
+                - (updated_record, new_cycle) for cycle closures with new starts
 
         Note:
-            The method delegates to specific handlers based on the detected
-            state pattern (moving, idling, or transitioning).
+            The method delegates to specialized handlers based on detected
+            patterns, ensuring appropriate business logic for each scenario.
         """
         curr_rec = context.current_record
         last_rec = context.last_record
@@ -161,24 +174,29 @@ class LoadingAreaHandler(CycleStateHandler):
     def _handle_idling_near_loader(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-        """Handle truck idling near loader.
+        """Handle truck continuously idling near loader.
 
-        Processes scenarios where a truck is stationary near a loader.
-        If the truck has been idle for longer than the configured threshold
-        and hasn't started loading yet, this initiates a new loading cycle.
-        If already in LOAD_TIME and idle exceeds geofence threshold, marks
-        as outlier.
+        Processes scenarios where a truck remains stationary near a loader.
+        Determines whether to start loading, mark as outlier, or initiate
+        a new cycle based on idle duration and current segment.
+
+        The method handles:
+        1. Initial idle: Check if threshold met to start operations
+        2. LOAD_TIME segment: Check for outlier behavior
+        3. Other segments: Initiate new cycle if threshold exceeded
 
         Args:
-            context: Cycle comparison context
+            context (CycleComparisonContext): Contains cycle and loader information
 
         Returns:
-            Tuple of (updated_record, new_cycle_record) or (None, None)
+            Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
+                - (None, None) if idle duration below threshold
+                - (updated_record, None) for outlier marking in LOAD_TIME
+                - Results from _start_new_cycle for other scenarios
 
-        Note:
-            Uses IDLE_THRESHOLD_FOR_START_LOAD to determine when to
-            start a new cycle and IDLE_THRESHOLD_IN_GEOFENCE_AREA for
-            outlier detection.
+        Business Rules:
+            - Uses IDLE_THRESHOLD_FOR_START_LOAD (default 20s) for loading start
+            - Uses IDLE_THRESHOLD_IN_GEOFENCE_AREA (default 1200s) for outliers
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -202,28 +220,23 @@ class LoadingAreaHandler(CycleStateHandler):
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
         """Handle extended idling during LOAD_TIME segment.
 
-        Processes scenarios where a truck is already in LOAD_TIME segment
-        but continues idling beyond normal loading duration. If idle time
-        exceeds the geofence area threshold, marks the record as outlier
-        to indicate abnormal behavior.
+        Processes scenarios where a truck already in LOAD_TIME continues
+        idling beyond normal loading duration. Marks as outlier if idle
+        time exceeds geofence threshold, indicating operational issues.
 
         Args:
-            context: Cycle comparison context containing current and last records
-            idle_duration: Total seconds truck has been idling
+            context (CycleComparisonContext): Contains current and previous records
+            idle_duration (float): Total seconds truck has been idling
 
         Returns:
             Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-                - (updated_record, None) if marking as outlier
-                - (None, None) if no action needed
+                - (None, None) if already outlier or within threshold
+                - (updated_record, None) with outlier marking if threshold exceeded
 
         Business Logic:
-            - If already marked as outlier: No action taken
-            - If idle > IDLE_THRESHOLD_IN_GEOFENCE_AREA: Mark as outlier
-            - Otherwise: Continue normal LOAD_TIME processing
-
-        Note:
-            Outlier detection helps identify trucks that may be broken down,
-            waiting excessively, or experiencing operational issues.
+            - Skip if already marked as outlier
+            - Mark as outlier if idle > IDLE_THRESHOLD_IN_GEOFENCE_AREA
+            - Captures loader position and sets outlier_type_id=3 for load area
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -256,22 +269,30 @@ class LoadingAreaHandler(CycleStateHandler):
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
         """Start a new cycle and close the previous one if needed.
 
-        Handles two scenarios:
-        1. If last_rec.current_segment is None: Updates the initial record
-           from cold start to begin LOAD_TIME segment
-        2. If last_rec.current_segment exists: Closes the previous cycle
-           and creates a new one
+        Handles cycle initialization and transitions based on the current
+        segment. For initial records (no segment), sets up LOAD_TIME.
+        For existing cycles, closes them appropriately and creates new ones.
+
+        The method handles:
+        1. Initial record (segment=None): Initialize LOAD_TIME segment
+        2. Already in LOAD_TIME: No action needed
+        3. Other segments: Close previous cycle and create new one
 
         Args:
-            context: Cycle comparison context
+            context (CycleComparisonContext): Contains cycle and loader information
 
         Returns:
-            Tuple of (updated_record, new_cycle_record) where:
-            - For initial records: (updated_initial_record, None)
-            - For existing cycles: (closed_previous_cycle, new_cycle)
+            Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
+                - (updated_initial_record, None) for cold start
+                - (None, None) if already in LOAD_TIME
+                - (closed_cycle, new_cycle) for segment transitions
 
         Raises:
-            Logs error if loader information is missing when required
+            Logs error if loader information missing for initial record
+
+        Note:
+            Loader information is critical for initial records but may be
+            available from context for subsequent cycles.
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -341,27 +362,25 @@ class LoadingAreaHandler(CycleStateHandler):
     ) -> Optional[CycleRecord]:
         """Close the previous cycle based on its segment.
 
-        Determines how to close a cycle based on what segment it was in.
-        Different segments require different closing logic:
+        Determines appropriate closure logic based on the segment the cycle
+        was in when returning to the loading area. Different segments require
+        different status assignments and duration calculations.
 
-        - LOAD_TRAVEL: Indicates abnormal transition (truck dumped outside
-          dump region), cycle marked as INVALID
-        - EMPTY_TRAVEL: Normal transition, can be COMPLETE or INVALID based
-          on whether all required segments were executed
-        - DUMP_TIME: Transition from dump area back to load area without
-          completing empty travel
+        Segment-specific handling:
+        - LOAD_TRAVEL: Abnormal (truck dumped outside region) -> INVALID
+        - EMPTY_TRAVEL: Normal completion -> COMPLETE or INVALID
+        - DUMP_TIME: Unusual (skipped EMPTY_TRAVEL) -> closes with dump duration
 
         Args:
-            context: Cycle comparison context
+            context (CycleComparisonContext): Contains cycle transition information
 
         Returns:
-            Optional[CycleRecord]: Updated record with closed cycle,
-                                 or None if no closing needed
+            Optional[CycleRecord]: Updated record with cycle closure, or None
+                if unexpected segment encountered
 
         Note:
-            This method is called when a truck has been idle long enough
-            to start a new loading cycle, requiring the previous cycle
-            to be properly closed.
+            Each segment closure has specific business implications for
+            operational tracking and compliance monitoring.
         """
         last_rec = context.last_record
         segment = last_rec.current_segment
@@ -384,28 +403,25 @@ class LoadingAreaHandler(CycleStateHandler):
     def _close_load_travel_cycle(
         self: Self, context: CycleComparisonContext
     ) -> CycleRecord:
-        """Close a load travel cycle (abnormal transition).
+        """Close a cycle that was in LOAD_TRAVEL when returning to loader.
 
-        Closes a cycle that was in the LOAD_TRAVEL segment when returning
-        to LOAD_TIME. This indicates an abnormal transition where the truck
-        dumped material outside the designated dump region, skipping the
-        DUMP_TIME and EMPTY_TRAVEL segments. The cycle is always marked
-        as INVALID.
+        Handles abnormal cycle pattern where truck returns to loading area
+        directly from LOAD_TRAVEL, indicating material was dumped outside
+        designated dump regions. Always marks cycle as INVALID.
 
-        This handles the abnormal pattern:
-        LOAD_TIME -> LOAD_TRAVEL -> LOAD_TIME (skipping DUMP_TIME & EMPTY_TRAVEL)
+        Pattern: LOAD_TIME -> LOAD_TRAVEL -> LOAD_TIME (skipped DUMP_TIME)
 
         Args:
-            context: Cycle comparison context
+            context (CycleComparisonContext): Contains cycle information
 
         Returns:
             CycleRecord: Updated record with INVALID status and calculated
-                        load travel duration
+                load_travel_seconds
 
         Business Impact:
-            - Identifies unauthorized dumping locations
-            - Tracks material loss outside designated areas
-            - Helps improve operational compliance
+            - Identifies unauthorized dumping
+            - Tracks material loss
+            - Supports compliance monitoring
         """
         last_rec = context.last_record
         base_params = self.factory.create_base_params(
@@ -438,28 +454,25 @@ class LoadingAreaHandler(CycleStateHandler):
     def _close_empty_travel_cycle(
         self: Self, context: CycleComparisonContext
     ) -> CycleRecord:
-        """Close an empty travel cycle (normal transition).
+        """Close a cycle that was in EMPTY_TRAVEL when returning to loader.
 
-        Closes a cycle that was in the EMPTY_TRAVEL segment when returning
-        to LOAD_TIME. This is the normal cycle completion pattern where all
-        segments were executed in order:
-        LOAD_TIME -> LOAD_TRAVEL -> DUMP_TIME -> EMPTY_TRAVEL -> LOAD_TIME
+        Handles normal cycle completion pattern where truck returns to
+        loading area after completing all segments. Marks as COMPLETE if
+        all segment durations present, otherwise INVALID.
 
-        The cycle is marked as:
-        - COMPLETE: If all required segments have valid durations
-        - INVALID: If any required segment duration is missing
+        Pattern: LOAD_TIME -> LOAD_TRAVEL -> DUMP_TIME -> EMPTY_TRAVEL -> LOAD_TIME
 
         Args:
-            context: Cycle comparison context
+            context (CycleComparisonContext): Contains cycle information
 
         Returns:
-            CycleRecord: Updated record with appropriate status and
-                        calculated durations
+            CycleRecord: Updated record with appropriate status and calculated
+                empty_travel_seconds and total_cycle_seconds
 
-        Note:
-            A cycle is considered complete only if it has valid durations
-            for all four segments: loading, load travel, dumping, and
-            empty travel.
+        Business Logic:
+            - Calculates empty_travel_seconds from dump_end to current
+            - Validates all four segment durations exist
+            - Sums durations for total_cycle_seconds if COMPLETE
         """
         last_rec = context.last_record
         base_params = self.factory.create_base_params(
@@ -537,32 +550,24 @@ class LoadingAreaHandler(CycleStateHandler):
         self: Self,
         context: CycleComparisonContext
     ) -> CycleRecord:
-        """Close a dump time cycle (unusual transition).
+        """Close a cycle that was in DUMP_TIME when returning to loader.
 
-        Closes a cycle that was in the DUMP_TIME segment when returning
-        to LOAD_TIME. This is an unusual pattern where the truck returns
-        to loading without completing the EMPTY_TRAVEL segment, indicating
-        either operational issues or special circumstances.
+        Handles unusual pattern where truck returns to loading area directly
+        from DUMP_TIME, skipping EMPTY_TRAVEL. Calculates dump duration based
+        on idle time at dump location.
 
-        Pattern handled:
-        LOAD_TIME -> LOAD_TRAVEL -> DUMP_TIME -> LOAD_TIME (skipping EMPTY_TRAVEL)
+        Pattern: LOAD_TIME -> LOAD_TRAVEL -> DUMP_TIME -> LOAD_TIME
 
         Args:
-            context: Cycle comparison context with current and last records
+            context (CycleComparisonContext): Contains cycle information
 
         Returns:
-            CycleRecord: Updated record with calculated dump duration and
-                        cycle end time. The cycle will likely be marked
-                        INVALID due to missing EMPTY_TRAVEL segment.
+            CycleRecord: Updated record with dump duration and cycle closure
 
         Business Impact:
             - Identifies irregular operational patterns
-            - May indicate emergency returns or operational disruptions
-            - Helps track cycle inefficiencies
-
-        Note:
-            This scenario is rare but must be handled to maintain data
-            integrity and avoid orphaned DUMP_TIME segments.
+            - May indicate emergency returns or disruptions
+            - Cycle likely marked INVALID due to missing EMPTY_TRAVEL
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -593,14 +598,14 @@ class LoadingAreaHandler(CycleStateHandler):
         loading operations and implied loading scenarios where the truck
         completed loading between GPS updates.
 
-        State Transitions Handled:
-            1. WORKING -> IDLING: Truck stops moving, only updates state
-            2. IDLING -> WORKING: Truck starts moving
-            - If idle > threshold: Implies loading occurred, handles
-                based on current segment
-            - If in LOAD_TIME with load_start_utc: Completes loading
-                normally, transitions to LOAD_TRAVEL
-            - Otherwise: Only updates work state
+        State Transitions:
+            1. WORKING -> IDLING: Store loader info in tmp_idle_near_loader
+            2. IDLING -> WORKING: Complex branching based on conditions:
+               - Outlier recovery with synthetic loading
+               - Implied dump completion (DUMP_TIME segment)
+               - Implied loading for various segments
+               - Normal loading completion
+               - Simple state updates
 
         The implied loading logic handles real-world scenarios where:
             - GPS update frequency is low (30s to several minutes)
@@ -619,6 +624,12 @@ class LoadingAreaHandler(CycleStateHandler):
                 - For state updates: (updated_record, None)
                 - For cycle closure: (closed_cycle, new_cycle)
                 - For no action: (None, None)
+
+        Business Logic:
+            The method implements sophisticated logic to handle real-world
+            scenarios including GPS gaps, operational outliers, and
+            segment-specific transitions. The tmp_idle_near_loader field
+            stores loader information for future reference.
 
         Note:
             Implied loading creates more complete operational records
@@ -806,34 +817,36 @@ class LoadingAreaHandler(CycleStateHandler):
         context: CycleComparisonContext,
         idle_duration: float
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-        """Handle cycle closure and creation after outlier idle period.
+        """Handle cycle closure and creation after outlier idle at loader.
 
         Processes scenarios where a truck exceeded idle thresholds and needs
-        to close the current cycle as OUTLIER and start a new cycle. This
-        handles recovery from extended idle periods that indicate operational
-        issues.
+        to close the current cycle as OUTLIER and start a new cycle. Creates
+        a synthetic 20-second loading period for the new cycle to maintain
+        data continuity.
 
-        The method creates a synthetic loading period of 20 seconds for the
-        new cycle to maintain data continuity, as the actual loading likely
-        occurred during the extended idle period.
+        The method handles recovery from extended idle periods that indicate
+        operational issues like equipment failure, extended queuing, or other
+        disruptions at the loading area.
 
         Args:
-            context: Cycle comparison context with current/previous records
-            idle_duration: Total seconds truck was idle before moving
+            context (CycleComparisonContext): Contains cycle and loader information
+            idle_duration (float): Total seconds truck was idle before moving
 
         Returns:
             Tuple[CycleRecord, CycleRecord]:
                 - Updated record: Previous cycle closed with OUTLIER status
-                - New record: Fresh cycle started in LOAD_TRAVEL segment
+                - New record: Fresh cycle started in LOAD_TRAVEL segment with
+                  synthetic 20-second load time
 
         Business Logic:
             - Closes current cycle with OUTLIER status
-            - Accumulates outlier seconds if already marked as outlier
-            - Creates new cycle with synthetic 20-second load time
+            - Accumulates outlier_seconds if already marked as outlier
+            - Creates new cycle with synthetic 20-second load duration
             - New cycle starts directly in LOAD_TRAVEL segment
+            - Preserves loader information for operational tracking
 
         Note:
-            The 20-second synthetic load time is a business rule to ensure
+            The 20-second synthetic load time is a business rule ensuring
             all cycles have some loading duration while acknowledging the
             loading likely occurred during the untracked idle period.
         """
@@ -943,24 +956,29 @@ class LoadingAreaHandler(CycleStateHandler):
 
         Returns:
             Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-                - Initial record: (updated_record, None)
+                - Initial: (updated_record, None)
                 - EMPTY_TRAVEL: (closed_cycle, new_cycle)
-                - LOAD_TRAVEL at same loader: (updated_record, None)
+                - LOAD_TRAVEL same loader: (updated_record, None)
                 - LOAD_TRAVEL from dump: (updated_record, None)
-                - Unexpected segments: (updated_record, None) with warning
-                - Missing loader: (None, None) with error
+                - Other: (updated_record, None) with warning
 
         Business Impact:
-            - Captures loading operations that occur between updates
-            - Handles interrupted/continued loading scenarios
-            - Maintains complete cycle records for accurate KPIs
+            - Captures loading operations missed by GPS gaps
+            - Handles interrupted/repositioned loading scenarios
+            - Maintains complete cycle records for KPI accuracy
             - Improves loader utilization tracking
 
         Example Timeline:
-            10:00 - Truck starts loading (LOAD_TIME)
-            10:03 - Truck moves to reposition (LOAD_TRAVEL)
+            Scenario 1 - Normal implied loading:
+            10:00 - Truck arrives at loader (EMPTY_TRAVEL)
+            10:00 - Truck idles (IDLING)
+            10:05 - Truck departs (WORKING) - loading implied
+
+            Scenario 2 - Continued loading:
+            10:00 - Truck loading (LOAD_TIME)
+            10:03 - Truck repositions (LOAD_TRAVEL)
             10:04 - Truck idles at same loader (IDLING)
-            10:08 - Truck departs (WORKING) - continued loading detected
+            10:08 - Truck departs (WORKING) - continued loading
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -1236,6 +1254,42 @@ class LoadingAreaHandler(CycleStateHandler):
         self: Self,
         context: CycleComparisonContext
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
+        """Handle dump completion when DUMP_TIME truck arrives at load area.
+
+        Processes the special case where a truck in DUMP_TIME segment arrives
+        at the loading area, implying dump operations were completed. This
+        method handles extended idle scenarios with synthetic duration assignment.
+
+        The method implements special logic for extremely long idle periods
+        (> MAX_IDLE_THRESHOLD_TO_CLOSE_STATE), assigning synthetic durations
+        to maintain data integrity and close cycles appropriately.
+
+        Args:
+            context (CycleComparisonContext): Contains cycle information
+
+        Returns:
+            Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
+                - If idle > MAX threshold: (closed_cycle, new_cycle) with
+                  synthetic 900s dump and empty_travel durations
+                - Otherwise: (updated_record, None) with calculated dump duration
+
+        Business Logic:
+            Extended idle (> 1800s default):
+            - Assigns 900s dump_seconds
+            - Assigns 900s empty_travel_seconds
+            - Closes cycle (COMPLETE or INVALID based on segments)
+            - Creates new cycle without segment
+
+            Normal idle:
+            - Calculates actual dump duration
+            - Transitions to EMPTY_TRAVEL
+            - Continues current cycle
+
+        Note:
+            The synthetic 900-second durations are business rules to handle
+            edge cases where trucks have excessively long idle periods that
+            likely indicate operational issues or data quality problems.
+        """
         last_rec = context.last_record
         curr_rec = context.current_record
 

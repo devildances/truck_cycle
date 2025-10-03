@@ -14,16 +14,18 @@ logger = logging.getLogger(__name__)
 
 
 class DumpingAreaHandler(CycleStateHandler):
-    """Handler for dumping area cycle logic with implied dumping support.
+    """Handler for dumping area cycle logic with comprehensive dump management.
 
-    Manages cycle state transitions when a haul truck is in the dumping area.
-    This includes detecting when dumping starts, tracking dumping duration,
-    handling transitions to empty travel segments, and managing implied dumping
-    scenarios where trucks complete dumping between GPS updates.
+    Manages cycle state transitions when a haul truck is in the dumping area,
+    including dump initiation, dump completion, implied dumping scenarios,
+    outlier detection, and continued dumping at the same region.
 
-    The handler supports both explicit dumping detection (continuous idling
-    leading to DUMP_TIME) and implied dumping detection (extended idle followed
-    by movement), making it robust for sparse GPS data scenarios.
+    The handler supports multiple operational scenarios:
+    1. Normal dumping: Explicit dump detection through continuous idling
+    2. Implied dumping: Dump operations that occurred between GPS updates
+    3. Continued dumping: Trucks repositioning within the same dump region
+    4. Outlier detection: Extended idle periods exceeding thresholds
+    5. Outlier recovery: Creating new cycles after outlier resolution
 
     Key Features:
         - Detects dumping start based on idle duration thresholds
@@ -33,28 +35,33 @@ class DumpingAreaHandler(CycleStateHandler):
         - Supports continued dumping at same region (repositioning)
         - Records dump region information for tracking
         - Detects outlier behavior for extended idle periods
+        - Creates new cycles when recovering from outlier status
 
     Attributes:
-        factory: CycleRecordFactory instance for creating records
-        calculator: DurationCalculator instance for time calculations
+        factory (CycleRecordFactory): Instance for creating cycle records
+        calculator (DurationCalculator): Instance for time calculations
 
     Business Rules:
         - Truck must idle > IDLE_THRESHOLD_FOR_START_DUMP to start dumping
         - Dumping completes when truck transitions from IDLING to WORKING
+        - Extended idle > IDLE_THRESHOLD_IN_GEOFENCE_AREA marks as outlier
         - Implied dumping handles cases where GPS missed dumping state
         - Same dump region validated for continued dumping scenarios
-        - Extended idle > IDLE_THRESHOLD_IN_GEOFENCE_AREA marks as outlier
 
     Example:
         >>> handler = DumpingAreaHandler()
-        >>> updated, _ = handler.handle(context)
-        >>> if updated and updated.current_segment == "DUMP_TIME":
+        >>> updated, new = handler.handle(context)
+        >>> if updated and updated.current_segment == CycleSegment.DUMP_TIME:
         ...     print(f"Started dumping at region {updated.dump_region_guid}")
+        >>> elif updated and updated.current_segment == CycleSegment.EMPTY_TRAVEL:
+        ...     print(f"Completed dumping, duration: {updated.dump_seconds}s")
 
     Note:
         Unlike LoadingAreaHandler, DumpingAreaHandler typically doesn't create
         new cycles except when recovering from outlier status. It primarily
-        updates existing cycles with dumping information.
+        updates existing cycles with dumping information. The handler now
+        includes sophisticated logic for handling continued dumping operations
+        where trucks may reposition within the same dump region.
     """
 
     def __init__(self: Self) -> None:
@@ -69,28 +76,29 @@ class DumpingAreaHandler(CycleStateHandler):
     def handle(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-        """Handle cycle logic in dumping area.
+        """Handle cycle logic in dumping area with multiple state patterns.
 
         Processes the cycle comparison context to determine appropriate
-        actions based on the truck's current and previous states. This
-        includes handling trucks idling for dumping and state transitions.
+        actions based on the truck's current and previous states. Routes
+        to specific handlers for different operational patterns.
 
-        The method routes to specific handlers based on detected patterns:
-        - Continuous idling: May trigger DUMP_TIME segment
-        - State transitions: Handle start/stop of dumping operations
+        The method identifies two main patterns:
+        1. Continuous idling: Both states IDLING (check thresholds)
+        2. State transition: Different states (handle various transitions)
 
         Args:
-            context: Cycle comparison context with current/previous records
-                    and dump_region information
+            context (CycleComparisonContext): Contains current/previous records,
+                dump region information, and spatial context
 
         Returns:
-            Tuple of (updated_record, new_record) - typically doesn't create
-            new cycles in dumping area. The second element is None unless
-            recovering from outlier status.
+            Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
+                - (None, None) if no action needed
+                - (updated_record, None) for most dump operations
+                - (updated_record, new_cycle) only for outlier recovery
 
         Note:
-            The dumping area handler only updates existing records,
-            except when creating new cycles after outlier recovery.
+            The dumping area handler focuses on updating existing cycles
+            rather than creating new ones, except in outlier recovery cases.
         """
         curr_rec = context.current_record
         last_rec = context.last_record
@@ -200,36 +208,31 @@ class DumpingAreaHandler(CycleStateHandler):
         This method now includes outlier detection for extended idle periods
         that exceed operational norms.
 
-        The method follows a priority order:
-        1. Check if already marked as outlier (no further action)
-        2. Check if idle exceeds geofence threshold (mark as outlier)
-        3. Otherwise, handle normal dumping transitions
-
-        Segment-specific behavior for normal transitions:
-        - LOAD_TRAVEL: Transition to DUMP_TIME and calculate load travel time
-        - DUMP_TIME: Already dumping, no action needed
-        - Other: Transition to DUMP_TIME (unusual but handled)
+        Priority order:
+        1. Already marked as outlier: Skip processing
+        2. Exceeds geofence threshold: Mark as outlier
+        3. Already in DUMP_TIME: Continue dumping (no action)
+        4. In LOAD_TRAVEL: Transition to DUMP_TIME
+        5. Other segments: Transition to DUMP_TIME (with warning)
 
         Args:
-            context: Cycle comparison context with segment information
-            idle_duration: Total seconds truck has been idling
+            context (CycleComparisonContext): Contains segment and region info
+            idle_duration (float): Total seconds truck has been idling
 
         Returns:
-            Tuple of (updated_record, None) or (None, None)
-                - Updated record for segment transitions or outlier marking
-                - (None, None) if already in DUMP_TIME or already outlier
+            Tuple[Optional[CycleRecord], None]:
+                - (None, None) if already outlier or in DUMP_TIME
+                - (updated_record, None) for segment transitions or outlier marking
 
-        Business Impact:
-            - Ensures accurate dump time tracking
-            - Identifies trucks with excessive idle time at dump
-            - Calculates load travel duration when appropriate
-            - Handles edge cases gracefully
+        Business Logic:
+            Outlier detection (idle > IDLE_THRESHOLD_IN_GEOFENCE_AREA):
+            - Sets is_outlier = True
+            - Records outlier_type_id = 2 (dump area outlier)
+            - Captures GPS position and dump region
 
-        Note:
-            The outlier check takes precedence over normal segment transitions
-            to ensure problematic behavior is captured. The DUMP_TIME check
-            prevents duplicate processing when a truck continues idling at
-            the dump location.
+            Normal transitions:
+            - LOAD_TRAVEL → DUMP_TIME: Expected flow, calculates load_travel_seconds
+            - Other → DUMP_TIME: Unexpected but handled, logs warning
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -276,24 +279,21 @@ class DumpingAreaHandler(CycleStateHandler):
     ) -> Tuple[CycleRecord, None]:
         """Transition from LOAD_TRAVEL to DUMP_TIME segment.
 
-        Updates the cycle record to DUMP_TIME segment when a truck that was
-        traveling with load has been idle long enough to start dumping.
-        This is the normal progression in the cycle flow.
+        Updates the cycle record when a truck that was traveling with load
+        has been idle long enough to start dumping. This is the normal
+        progression in the cycle flow.
 
         The method:
         1. Validates dump region information is available
-        2. Calculates load travel duration from load_end_utc
-        3. Sets dump_start_utc to when idling began
+        2. Calculates load travel duration from load_end_utc to arrival
+        3. Sets dump_start_utc to when idling began (not current time)
         4. Updates segment to DUMP_TIME with dump region info
 
         Args:
-            context: Cycle comparison context containing:
-                    - last_record: With LOAD_TRAVEL segment and timing
-                    - current_record: Current position information
-                    - dump_region: Required dump region information
+            context (CycleComparisonContext): Contains dump region and timing info
 
         Returns:
-            Tuple of (updated_record, None)
+            Tuple[CycleRecord, None]:
                 - Updated record with DUMP_TIME segment and calculations
                 - None (never creates new cycles)
 
@@ -301,16 +301,16 @@ class DumpingAreaHandler(CycleStateHandler):
             Logs error and returns (None, None) if dump_region is missing
 
         Business Logic:
-            - Load travel time = dump arrival - load completion
-            - Dump starts when truck became idle (not current time)
+            - Load travel time = arrival at dump - load completion
+            - Dump starts when truck became idle (previous timestamp)
             - Dump region tracked for operational reporting
 
         Example Timeline:
             09:45 - Load completed (load_end_utc)
-            09:55 - Arrived at dump, started idling
-            09:58 - Still idling (current), threshold exceeded
+            09:55 - Arrived at dump, started idling (last_rec.current_process_date)
+            09:58 - Still idling, threshold exceeded (current)
             Result: load_travel_seconds = 600s (10 min)
-                   dump_start_utc = 09:55
+                   dump_start_utc = 09:55 (when idling began)
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -366,16 +366,17 @@ class DumpingAreaHandler(CycleStateHandler):
         than LOAD_TRAVEL. This handles edge cases where trucks end up at
         dump areas from unexpected states.
 
-        This is an unusual scenario that might occur due to:
+        This unusual scenario might occur due to:
         - GPS data gaps causing missed state transitions
         - Operational irregularities
         - Initial records starting at dump area
+        - System restarts during operations
 
         Args:
-            context: Cycle comparison context with dump region
+            context (CycleComparisonContext): Contains dump region information
 
         Returns:
-            Tuple of (updated_record, None)
+            Tuple[CycleRecord, None]:
                 - Updated record with DUMP_TIME segment
                 - None (never creates new cycles)
 
@@ -432,30 +433,30 @@ class DumpingAreaHandler(CycleStateHandler):
     def _handle_state_transition(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-        """Handle work state transitions in dumping area.
+        """Handle work state transitions in dumping area with complex logic.
 
         Processes transitions between WORKING and IDLING states when the
-        truck is in the dumping area. This method handles normal dumping
-        operations, implied dumping scenarios, and outlier recovery cases
-        where trucks exceed operational thresholds.
+        truck is in the dumping area. Implements sophisticated handling for
+        normal dump operations, implied dumping, continued dumping, and
+        outlier recovery scenarios.
 
-        State Transitions Handled:
-            1. WORKING -> IDLING: Truck stops moving, only updates work state
-               and sets idle_in_dump_region_guid
-            2. IDLING -> WORKING: Truck starts moving
-               - If outlier or idle > geofence threshold: Handle outlier
-                 recovery (close cycle, create new)
-               - If idle > dump threshold: Implies dumping occurred,
-                 transitions directly to EMPTY_TRAVEL
-               - If already in DUMP_TIME: Completes dumping, transitions
-                 to EMPTY_TRAVEL
-               - Otherwise: Only updates work state
+        State Transitions:
+            1. WORKING -> IDLING: Truck stops, updates state and sets
+               idle_in_dump_region_guid
+            2. IDLING -> WORKING: Complex logic based on conditions:
+               - If outlier or idle > geofence threshold: Outlier recovery
+               - If idle > dump threshold: Implied dumping occurred
+               - If in DUMP_TIME: Normal dump completion
+               - Otherwise: Simple state update
+
+        Special Features:
+            - Handles continued dumping at same region (EMPTY_TRAVEL case)
+            - Tracks idle_in_dump_region_guid for region validation
+            - Manages outlier recovery with new cycle creation
 
         Args:
-            context: Cycle comparison context containing:
-                - current_record: Current state with work_state_id
-                - last_record: Previous state with timing information
-                - dump_region: Dump region information (if available)
+            context (CycleComparisonContext): Contains transition information,
+                dump region details, and timing context
 
         Returns:
             Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
@@ -463,16 +464,12 @@ class DumpingAreaHandler(CycleStateHandler):
                 - (updated_record, new_cycle) for outlier recovery
                 - (None, None) if no action needed
 
-        Note:
-            The method now includes outlier detection and recovery, allowing
-            it to create new cycles when recovering from extended idle periods.
-            This ensures continuous tracking despite operational disruptions.
-
-        Example:
-            If a truck was idle for 5 minutes (> 3 minute threshold) but
-            the next GPS update shows it's already moving, we infer that
-            dumping occurred during the idle period and transition directly
-            to EMPTY_TRAVEL.
+        Business Logic:
+            The method now includes sophisticated handling for:
+            - Outlier detection and recovery
+            - Implied dumping scenarios
+            - Continued dumping at same region
+            - Normal dump completions
         """
         curr_rec = context.current_record
         last_rec = context.last_record
@@ -567,8 +564,8 @@ class DumpingAreaHandler(CycleStateHandler):
         operations. The new cycle starts fresh without any segment.
 
         Args:
-            context: Cycle comparison context with current/previous records
-            idle_duration: Total seconds truck was idle at dump area
+            context (CycleComparisonContext): Contains cycle and dump region info
+            idle_duration (float): Total seconds truck was idle at dump area
 
         Returns:
             Tuple[CycleRecord, CycleRecord]:
@@ -577,21 +574,18 @@ class DumpingAreaHandler(CycleStateHandler):
 
         Business Logic:
             - Closes current cycle with OUTLIER status
-            - Accumulates outlier seconds if already marked as outlier
+            - Accumulates outlier_seconds if already marked as outlier
+            - Sets outlier_type_id = 2 for dump area outlier
             - Creates new cycle starting from no segment
             - Preserves cycle continuity despite disruptions
-
-        Note:
-            This is a new method added to handle outlier scenarios specific
-            to the dump area. It ensures proper cycle management when trucks
-            have extended idle periods that exceed operational norms.
 
         Example Timeline:
             10:00 - Truck arrives at dump area
             10:05 - Truck starts idling (equipment issue)
             11:35 - Still idling (90 min > geofence threshold)
             11:40 - Truck resumes operation
-            Result: Previous cycle closed as OUTLIER, new cycle created
+            Result: Previous cycle closed as OUTLIER
+                   New minimal cycle created for tracking
         """
         curr_rec = context.current_record
         last_rec = context.last_record
@@ -646,69 +640,60 @@ class DumpingAreaHandler(CycleStateHandler):
         context: CycleComparisonContext,
         idle_duration: float
     ) -> Tuple[CycleRecord, None]:
-        """Handle case where truck dumped while idle but is now moving.
+        """Handle implied dumping where truck dumped between GPS updates.
 
-        Processes the scenario where a truck was idle in the dump area
-        long enough to complete dumping (exceeded threshold) but the next
-        GPS record shows it's already moving. This implies dumping occurred
-        during the idle period, so we transition directly to EMPTY_TRAVEL
-        and calculate all relevant durations.
+        Processes scenarios where a truck was idle in the dump area long
+        enough to complete dumping but the next GPS record shows it's already
+        moving. This handles real-world GPS tracking limitations and supports
+        continued dumping operations at the same region.
 
-        This method handles the edge case where GPS update frequency is
-        low and we don't capture the intermediate state where the truck
-        was actively dumping (IDLING in DUMP_TIME segment).
+        The method implements segment-specific logic:
+        1. LOAD_TRAVEL: Normal flow, calculates load_travel_seconds and
+           dump_seconds from idle period
+        2. EMPTY_TRAVEL: Continued dumping at same region (truck repositioned
+           and dumped more), validates same dump region
+        3. None (initial): Transitions but likely creates INVALID cycle
+        4. Other segments: Logs warning but still transitions
 
-        Segment-Specific Behavior:
-            - LOAD_TRAVEL: Normal flow, calculates load_travel_seconds
-              from load_end_utc to last_rec.current_process_date
-            - EMPTY_TRAVEL: Continued dumping at same region (repositioning)
-              Validates same dump region before accumulating dump time
-            - None (initial): Transitions but likely creates INVALID cycle
-            - Other segments: Logs warning but still transitions
-
-        The EMPTY_TRAVEL case handles interrupted dumping where trucks:
-            - Move slightly to reposition during dumping
-            - Have dumping interrupted and resumed
-            - Need multiple dumping positions at the same region
-        This is validated by checking the dump region hasn't changed.
-
-        Time Calculations:
-            - dump_start_utc: When truck became idle (last_rec.current_process_date)
-            - dump_end_utc: Current time (when truck is moving)
-            - dump_seconds: Duration of idle period (idle_duration)
-            - load_travel_seconds: From load_end_utc to arrival at dump
-              (only if load_end_utc exists)
+        Special handling for EMPTY_TRAVEL (continued dumping):
+        - Validates truck is at same dump region as before
+        - Accumulates dump time to existing dump_seconds
+        - Handles trucks that need multiple dump positions
+        - Logs warning if different dump region detected
 
         Args:
-            context: Cycle comparison context containing:
-                - current_record: Shows truck is now WORKING
-                - last_record: Shows truck was IDLING in dump area
-                - dump_region: Required dump region information
-            idle_duration: Total seconds truck was idle (already calculated
-                          and verified to exceed IDLE_THRESHOLD_FOR_START_DUMP)
+            context (CycleComparisonContext): Contains dump region and timing info
+            idle_duration (float): Seconds truck was idle (> dump threshold)
 
         Returns:
-            Tuple[CycleRecord, None]: Updated record with:
-                - current_segment set to EMPTY_TRAVEL
-                - dump_region_guid set
-                - dump_start_utc set to when idling began
-                - dump_end_utc set to current time
-                - dump_seconds set to idle_duration
-                - load_travel_seconds calculated (if possible)
-                - idle_in_dump_region_guid cleared
-            Returns (None, None) if dump_region is missing
+            Tuple[CycleRecord, None]:
+                - Updated record with EMPTY_TRAVEL segment and dump metrics
+                - None (never creates new cycles)
 
-        Example Timeline:
-            Case 1 - Normal dump:
-            10:00 - Truck arrives at dump (LOAD_TRAVEL)
-            10:00 - Truck idles (IDLING)
-            10:05 - Truck moving (WORKING) - dump complete
+        Business Logic:
+            Time Calculations:
+            - dump_start_utc: When truck became idle (previous timestamp)
+            - dump_end_utc: Current time (truck now moving)
+            - dump_seconds: Duration of idle period
+            - For EMPTY_TRAVEL: Accumulates to existing dump_seconds
 
-            Case 2 - Continued dump:
-            10:00 - Truck dumps partially (DUMP_TIME)
-            10:03 - Truck repositions (EMPTY_TRAVEL)
-            10:04 - Truck idles at same dump (IDLING)
-            10:07 - Truck departing (WORKING) - continued dump detected
+            Continued Dumping Validation:
+            - Same region: Add idle_duration to existing dump_seconds
+            - Different region: Log warning, treat as new dump
+
+        Example Timelines:
+            Case 1 - Normal dump (LOAD_TRAVEL):
+            10:00 - Truck arrives at dump
+            10:00 - Truck idles
+            10:05 - Truck moving - dump complete
+            Result: dump_seconds = 300s, transitions to EMPTY_TRAVEL
+
+            Case 2 - Continued dump (EMPTY_TRAVEL):
+            10:00 - First dump completed
+            10:03 - Truck repositions within same dump area
+            10:04 - Truck idles again
+            10:07 - Truck departing
+            Result: dump_seconds accumulates (original + 180s)
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -872,38 +857,45 @@ class DumpingAreaHandler(CycleStateHandler):
     def _complete_dump_time_to_empty_travel(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[CycleRecord, None]:
-        """Complete DUMP_TIME and transition to EMPTY_TRAVEL.
+        """Complete DUMP_TIME segment and transition to EMPTY_TRAVEL.
 
         Calculates dump duration and transitions the cycle to EMPTY_TRAVEL
-        segment when the truck starts moving after dumping. This represents
-        the normal completion of dumping operations.
+        segment when the truck starts moving after explicit dumping operations.
+        This represents the normal completion of dumping where the truck was
+        already in DUMP_TIME segment.
 
         The method:
         1. Calculates dump duration from dump_start_utc to current time
         2. Sets dump_end_utc to current timestamp
         3. Transitions to EMPTY_TRAVEL segment
-        4. Preserves all dumping metrics for reporting
+        4. Clears idle_in_dump_region_guid
+        5. Preserves all dumping metrics for reporting
 
         Args:
-            context: Cycle comparison context containing:
-                    - last_record: In DUMP_TIME with dump_start_utc
-                    - current_record: Shows truck is now WORKING
+            context (CycleComparisonContext): Contains timing and transition info
 
         Returns:
-            Tuple of (updated_record, None)
-                - Updated record with completed dump metrics
+            Tuple[CycleRecord, None]:
+                - Updated record with completed dump metrics and EMPTY_TRAVEL
                 - None (never creates new cycles)
 
         Business Logic:
-            - Dump duration includes entire idle period at dump
+            - Dump duration = current time - dump_start_utc
             - Empty travel begins immediately when truck moves
             - All dump metrics preserved for cycle completion
+            - Handles missing dump_start_utc gracefully
 
         Example:
             10:00 - Started dumping (dump_start_utc)
             10:05 - Truck starts moving (current)
             Result: dump_seconds = 300s (5 min)
-                    Segment changes to EMPTY_TRAVEL
+                   Segment changes to EMPTY_TRAVEL
+                   dump_end_utc = 10:05
+
+        Note:
+            This is the normal flow for dump completion, contrasting with
+            implied dump completion which handles GPS gaps. The truck was
+            explicitly tracked in DUMP_TIME before this transition.
         """
         last_rec = context.last_record
         curr_rec = context.current_record

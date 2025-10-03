@@ -19,41 +19,52 @@ class TravelingAreaHandler(CycleStateHandler):
     """Handler for traveling area cycle logic with outlier detection.
 
     Manages cycle state transitions when a haul truck is traveling between
-    loading and dumping areas. This includes monitoring for abnormal behavior
-    such as extended idle periods during travel segments that indicate
-    operational issues.
+    loading and dumping areas. This handler has expanded functionality beyond
+    simple outlier detection to handle cycle completions and dump completions
+    that occur while the truck is technically in a travel area.
 
-    The handler's primary responsibility is detecting outlier behavior when
-    trucks idle too long in areas that should be transit zones. This helps
-    identify breakdowns, traffic issues, or unauthorized stops.
+    The handler now processes three main scenarios:
+    1. Outlier detection: Extended idle periods indicating operational issues
+    2. Cycle completion: When trucks in EMPTY_TRAVEL complete cycles from
+       travel areas
+    3. Dump completion: When trucks complete dumping operations while in
+       travel areas
 
     Key Features:
-        - Monitors idle duration in travel segments
-        - Marks cycles as outliers when thresholds exceeded
-        - Handles outlier recovery by closing cycles and creating new ones
-        - Tracks outlier position and duration for analysis
-        - Accumulates outlier time for multiple idle events
+        - Monitors idle duration in travel segments for outlier behavior
+        - Handles cycle completion when EMPTY_TRAVEL trucks idle near loaders
+        - Processes dump completion for LOAD_TRAVEL/DUMP_TIME segments
+        - Creates new cycles after closing completed or outlier cycles
+        - Tracks outlier position and duration for operational analysis
+        - Manages implied loading and dumping operations
 
     Attributes:
-        factory: CycleRecordFactory instance for creating records
-        calculator: DurationCalculator instance for time calculations
+        factory (CycleRecordFactory): Instance for creating cycle records
+        calculator (DurationCalculator): Instance for time calculations
 
     Business Rules:
         - Idle > IDLE_THRESHOLD_IN_TRAVEL_SEGMENT marks as outlier
-        - Outlier cycles closed when truck resumes movement
-        - New cycle created after outlier closure for continuity
-        - Outlier position captured at first detection
+        - Idle > IDLE_THRESHOLD_FOR_LOAD_AFTER_IN_TRAVEL_AREA triggers
+          cycle completion for EMPTY_TRAVEL segments
+        - Idle > IDLE_THRESHOLD_FOR_DUMP_AFTER_IN_TRAVEL_AREA triggers
+          dump completion for LOAD_TRAVEL/DUMP_TIME segments
+        - New cycles created after cycle closure for continuity
 
     Example:
         >>> handler = TravelingAreaHandler()
         >>> updated, new = handler.handle(context)
-        >>> if updated and updated.is_outlier:
+        >>> if updated and updated.cycle_status == CycleStatus.COMPLETE:
+        ...     print(f"Cycle {updated.cycle_number} completed from travel area")
+        >>> elif updated and updated.is_outlier:
         ...     print(f"Outlier detected at ({updated.outlier_position_latitude}, "
         ...           f"{updated.outlier_position_longitude})")
 
     Note:
-        Unlike other handlers, TravelingAreaHandler can create new cycles
-        when recovering from outlier status to maintain operational continuity.
+        This handler can create new cycles in multiple scenarios:
+        - After closing outlier cycles
+        - After completing cycles from EMPTY_TRAVEL
+        - The handler uses information from tmp_idle_near_loader for loader
+          details when creating new cycles
     """
 
     def __init__(self: Self) -> None:
@@ -68,33 +79,34 @@ class TravelingAreaHandler(CycleStateHandler):
     def handle(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-        """Handle cycle logic in traveling area.
+        """Handle cycle logic in traveling area with multiple scenarios.
 
         Processes the cycle comparison context to determine appropriate
-        actions based on the truck's current and previous states. Primary
-        focus is on detecting and handling outlier behavior during travel.
+        actions based on the truck's current and previous states. The handler
+        now manages outlier detection, cycle completions, and dump completions
+        all within the travel area context.
 
-        The method routes to specific handlers based on patterns:
-        - Continuous idling: Check for outlier threshold
-        - State transitions: Handle movement changes and outlier recovery
+        The method routes to specific handlers based on work state patterns:
+        - Continuous idling: Check for outlier threshold or completion triggers
+        - State transitions: Handle movement changes, outlier recovery, and
+          operational completions
 
         Args:
-            context: Cycle comparison context with current/previous records
+            context (CycleComparisonContext): Contains current/previous records,
+                asset position, and related spatial information
 
         Returns:
-            Tuple of (updated_record, new_cycle_record) where either or
-            both can be None. New cycles are created only when closing
-            outlier cycles to maintain tracking continuity.
+            Tuple[Optional[CycleRecord], Optional[CycleRecord]]: 
+                - (updated_record, new_cycle_record) where either or both can
+                  be None
+                - New cycles are created when closing outlier cycles or
+                  completing operational cycles
 
         Business Impact:
             - Identifies operational disruptions in travel segments
-            - Enables tracking of breakdown locations
-            - Maintains cycle continuity despite disruptions
-
-        Note:
-            Unlike loading/dumping areas, traveling area can create new
-            cycles when an outlier cycle needs to be closed. This ensures
-            continuous tracking even after operational issues.
+            - Enables completion of cycles without entering load areas
+            - Handles dump operations that complete in travel zones
+            - Maintains cycle continuity across all scenarios
         """
         curr_rec = context.current_record
         last_rec = context.last_record
@@ -111,15 +123,15 @@ class TravelingAreaHandler(CycleStateHandler):
     ) -> bool:
         """Check if truck is continuously idling.
 
-        Determines if the truck is continuously idling in the travel area
-        based on both current and previous work states.
+        Determines if the truck has remained stationary between the previous
+        and current records.
 
         Args:
-            curr_rec: Current realtime record
-            last_rec: Previous cycle record
+            curr_rec (RealtimeRecord): Current telemetry record
+            last_rec (CycleRecord): Previous cycle record
 
         Returns:
-            bool: True if continuously idling, False otherwise
+            bool: True if both states show IDLING, False otherwise
         """
         return (
             last_rec.current_work_state_id == WorkState.IDLING
@@ -129,17 +141,17 @@ class TravelingAreaHandler(CycleStateHandler):
     def _is_state_transition(
         self: Self, curr_rec: RealtimeRecord, last_rec: CycleRecord
     ) -> bool:
-        """Check if there's a state transition.
+        """Check if there's a work state transition.
 
-        Detects when the truck's work state has changed between
-        the previous and current records.
+        Detects when the truck's operational state has changed between
+        WORKING and IDLING.
 
         Args:
-            curr_rec: Current realtime record
-            last_rec: Previous cycle record
+            curr_rec (RealtimeRecord): Current telemetry record
+            last_rec (CycleRecord): Previous cycle record
 
         Returns:
-            bool: True if work state has changed, False otherwise
+            bool: True if work state changed, False if unchanged
         """
         return curr_rec.work_state_id != last_rec.current_work_state_id
 
@@ -148,36 +160,30 @@ class TravelingAreaHandler(CycleStateHandler):
     ) -> Tuple[Optional[CycleRecord], None]:
         """Handle truck continuously idling in travel area.
 
-        Processes scenarios where a truck is continuously stationary in
-        the travel area (between loading and dumping zones). Extended idle
-        in travel areas indicates operational issues that need tracking.
+        Processes scenarios where a truck remains stationary in the travel
+        area. Extended idle periods may indicate operational issues requiring
+        outlier marking.
 
-        The method calculates total idle duration and marks the cycle as
-        outlier if the threshold is exceeded. This helps identify:
+        The method calculates idle duration and marks the cycle as outlier
+        if the threshold is exceeded. This helps identify:
         - Mechanical breakdowns
         - Traffic congestion
         - Unauthorized stops
         - Driver issues
 
         Args:
-            context: Cycle comparison context containing:
-                    - current_record: Shows truck still IDLING
-                    - last_record: Shows truck was IDLING
+            context (CycleComparisonContext): Contains current and previous
+                records with truck remaining in IDLING state
 
         Returns:
-            Tuple of (updated_record, None) or (None, None)
-                - Updated record marked as outlier if threshold exceeded
-                - (None, None) if still within acceptable idle time
+            Tuple[Optional[CycleRecord], None]: 
+                - (updated_record, None) if outlier threshold exceeded
+                - (None, None) if within acceptable idle time
 
         Business Logic:
-            - Idle duration = current timestamp - last timestamp
-            - Threshold: IDLE_THRESHOLD_IN_TRAVEL_SEGMENT (e.g., 30 min)
+            - Idle duration = current timestamp - previous timestamp
+            - Threshold: IDLE_THRESHOLD_IN_TRAVEL_SEGMENT (default 600s)
             - Outlier position captured from current GPS coordinates
-
-        Note:
-            Uses IDLE_THRESHOLD_IN_TRAVEL_SEGMENT to determine when to
-            mark as outlier. Sets outlier position from current record
-            to help maintenance teams locate stopped vehicles.
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -202,26 +208,24 @@ class TravelingAreaHandler(CycleStateHandler):
     ) -> Tuple[CycleRecord, None]:
         """Mark the cycle as outlier due to extended idle time.
 
-        Updates the cycle record to mark it as outlier and captures the
-        position where the outlier behavior occurred. If the cycle is
-        already marked as outlier, accumulates the additional idle time
-        to the existing outlier_seconds.
+        Updates the cycle record to indicate outlier status and captures
+        the position where the abnormal behavior occurred. For already marked
+        outliers, accumulates additional idle time to track total disruption.
 
         Args:
-            context: Cycle comparison context
-            outlier_duration: Total seconds for truck idling in this event
+            context (CycleComparisonContext): Contains cycle information
+            outlier_duration (float): Idle duration in seconds for this event
 
         Returns:
-            Tuple of (updated_record, None)
+            Tuple[CycleRecord, None]: Updated record with outlier status and
+                accumulated duration
 
         Business Logic:
-            - First outlier event: Sets is_outlier=True, captures position
-            - Subsequent events: Accumulates idle time to outlier_seconds
-            - Position is only captured on first outlier detection
-
-        Note:
-            Outlier tracking helps identify operational issues like
-            breakdowns, traffic congestion, or unauthorized stops.
+            - First outlier event: Sets is_outlier=True, captures GPS position,
+              initializes outlier_seconds
+            - Subsequent events: Accumulates time to existing outlier_seconds
+            - Position captured only on first detection for root cause analysis
+            - outlier_type_id=4 indicates travel area outlier
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -261,26 +265,38 @@ class TravelingAreaHandler(CycleStateHandler):
     def _handle_state_transition(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
-        """Handle work state transitions in traveling area.
+        """Handle work state transitions with expanded logic for completions.
 
-        Processes transitions between WORKING and IDLING states:
+        Processes transitions between WORKING and IDLING states, now including
+        logic for cycle completions and dump completions that occur in travel
+        areas. This expanded functionality handles trucks that complete
+        operations without entering their expected zones.
 
-        1. WORKING -> IDLING: Truck stops moving, update work state
-        2. IDLING -> WORKING: Truck starts moving
-           - If is_outlier: Close cycle as OUTLIER and create new cycle
-           - If idle > threshold: Mark as outlier
-           - Otherwise: Just update work state
+        State Transitions:
+            1. WORKING -> IDLING: Truck stops, only updates work state
+            2. IDLING -> WORKING: Complex logic based on cycle state:
+               - If outlier: Close cycle and create new
+               - If EMPTY_TRAVEL in LOAD/TRAVEL area and idle > threshold:
+                 Complete cycle
+               - If LOAD_TRAVEL/DUMP_TIME in DUMP area and idle > threshold:
+                 Complete dump
+               - Otherwise: Check for outlier threshold or update state
 
         Args:
-            context: Cycle comparison context
+            context (CycleComparisonContext): Contains transition information
+                including current/previous records and area context
 
         Returns:
-            Tuple of (updated_record, new_cycle_record) or (None, None)
+            Tuple[Optional[CycleRecord], Optional[CycleRecord]]:
+                - (updated_record, None) for state updates
+                - (closed_cycle, new_cycle) for completions
+                - (None, None) if no action needed
 
-        Note:
-            This handler can create new cycles when recovering from
-            outlier status, ensuring continuous tracking despite
-            operational disruptions.
+        Business Logic:
+            The method now handles three distinct completion scenarios:
+            1. Outlier recovery
+            2. Cycle completion from EMPTY_TRAVEL
+            3. Dump completion from LOAD_TRAVEL/DUMP_TIME
         """
         curr_rec = context.current_record
         last_rec = context.last_record
@@ -361,26 +377,25 @@ class TravelingAreaHandler(CycleStateHandler):
     def _close_outlier_cycle(
         self: Self, context: CycleComparisonContext
     ) -> Tuple[CycleRecord, CycleRecord]:
-        """Close outlier cycle and create a new cycle.
+        """Close outlier cycle and create a new cycle for continuity.
 
-        Closes the current cycle with OUTLIER status and creates a new
-        cycle for the truck to continue operations. This ensures continuous
-        tracking even after operational disruptions.
+        Closes the current cycle with OUTLIER status when the truck resumes
+        movement after extended idle period. Creates a new cycle to continue
+        tracking operations after the disruption is resolved.
 
         Args:
-            context: Cycle comparison context
+            context (CycleComparisonContext): Contains cycle information
 
         Returns:
-            Tuple of (updated_record, new_cycle_record)
+            Tuple[CycleRecord, CycleRecord]: 
+                - Updated record: Current cycle closed with OUTLIER status
+                - New record: Fresh cycle for continued tracking
 
         Business Logic:
-            - Closes current cycle with OUTLIER status
-            - Creates new cycle using factory's outlier recovery params
-            - New cycle starts fresh without carrying outlier state
-
-        Note:
-            The new cycle allows the truck to resume normal operations
-            after resolving whatever issue caused the extended idle.
+            - Sets cycle_status to OUTLIER
+            - Sets cycle_end_utc to current timestamp
+            - Creates minimal new cycle using outlier recovery parameters
+            - New cycle starts without segment assignment (unknown position)
         """
         last_rec = context.last_record
         curr_rec = context.current_record
@@ -416,6 +431,39 @@ class TravelingAreaHandler(CycleStateHandler):
         context: CycleComparisonContext,
         idle_duration: float
     ) -> Tuple[CycleRecord, CycleRecord]:
+        """Handle cycle completion from EMPTY_TRAVEL in travel/load areas.
+
+        Processes scenarios where a truck in EMPTY_TRAVEL segment completes
+        its cycle while technically in a travel area or has returned to a
+        load area. This handles implied loading operations where the truck
+        was idle long enough to load but is now moving.
+
+        The method handles two area-specific scenarios:
+        1. LOAD area: Creates new cycle with implied loading using stored
+           loader information
+        2. TRAVEL area: Creates new cycle without segment (position unknown)
+
+        Args:
+            context (CycleComparisonContext): Contains cycle and area information
+            idle_duration (float): Duration truck was idle in seconds
+
+        Returns:
+            Tuple[CycleRecord, CycleRecord]:
+                - Updated record: Previous cycle closed (COMPLETE/INVALID)
+                - New record: New cycle with appropriate initialization
+                  Returns (updated_rec, None) if idle duration doesn't exceed
+                  IDLE_THRESHOLD_FOR_LOAD_AFTER_IN_TRAVEL_AREA
+
+        Business Logic:
+            - Checks if idle_duration > IDLE_THRESHOLD_FOR_LOAD_AFTER_IN_TRAVEL_AREA
+            - If exceeded:
+              * Closes current cycle calculating empty_travel_seconds
+              * Determines status (COMPLETE if all segments present, else INVALID)
+              * Creates new cycle with area-specific initialization
+            - LOAD area: Uses tmp_idle_near_loader for loader details, sets
+              LOAD_TRAVEL segment with implied loading
+            - TRAVEL area: Creates minimal cycle without segment assignment
+        """
         curr_rec = context.current_record
         last_rec = context.last_record
 
@@ -519,6 +567,35 @@ class TravelingAreaHandler(CycleStateHandler):
         context: CycleComparisonContext,
         idle_duration: float
     ) -> Tuple[CycleRecord, CycleRecord]:
+        """Handle dump completion for trucks in LOAD_TRAVEL or DUMP_TIME segments.
+
+        Processes scenarios where a truck completes dumping operations while
+        in a travel area designated as DUMP. This handles implied dumping where
+        the truck was idle long enough to dump but is now moving.
+
+        The method handles two segment-specific scenarios:
+        1. LOAD_TRAVEL: Truck arrived at dump, idled, and is now leaving
+        2. DUMP_TIME: Truck continues dumping (accumulates dump time)
+
+        Args:
+            context (CycleComparisonContext): Contains cycle and segment information
+            idle_duration (float): Duration truck was idle in seconds
+
+        Returns:
+            Tuple[CycleRecord, None]: 
+                - Updated record with dump completion and EMPTY_TRAVEL segment
+                - None (no new cycle created for dump completions)
+
+        Business Logic:
+            - Checks if idle_duration > IDLE_THRESHOLD_FOR_DUMP_AFTER_IN_TRAVEL_AREA
+            - If exceeded:
+              * Sets segment to EMPTY_TRAVEL
+              * Sets dump_end_utc to current timestamp
+              * For LOAD_TRAVEL: Calculates fresh dump_seconds and load_travel_seconds
+              * For DUMP_TIME: Accumulates to existing dump_seconds
+            - Uses idle_in_dump_region_guid for dump region tracking
+            - Clears idle_in_dump_region_guid after processing
+        """
         curr_rec = context.current_record
         last_rec = context.last_record
 

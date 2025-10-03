@@ -1,0 +1,323 @@
+version: 0.2
+
+env:
+  variables:
+    DOCKER_BUILDKIT: "1"  # Enable BuildKit globally
+    # Default values - can be overridden by environment
+    SIGNOZ_COLLECTOR_IMAGE: "009096402984.dkr.ecr.us-east-1.amazonaws.com/custom-otel:latest"
+    TARGET_ARCHITECTURE: "linux/arm64"
+    AWS_CLI_ARCH: "aarch64"
+
+phases:
+  install:
+    runtime-versions:
+      docker: 23
+      python: 3.12
+    commands:
+      - echo "Build started on `date`"
+      - echo "Installing dependencies..."
+      - |
+        if ! command -v aws &> /dev/null; then
+          # Detect architecture dynamically
+          ARCH=$(uname -m)
+          case ${ARCH} in
+            x86_64)
+              AWS_CLI_ARCH="x86_64"
+              ;;
+            aarch64|arm64)
+              AWS_CLI_ARCH="aarch64"
+              ;;
+            *)
+              echo "Unsupported architecture: ${ARCH}. Defaulting to ${AWS_CLI_ARCH}"
+              ;;
+          esac
+          echo "Installing AWS CLI for architecture: ${AWS_CLI_ARCH}"
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_CLI_ARCH}.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+        fi
+
+  pre_build:
+    commands:
+      - echo "Pre-build phase started on `date`"
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | docker login --username AWS --password-stdin "${IMAGE_URI}"
+      - |
+        export REPOSITORY_URI="${IMAGE_URI}"
+        export COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+        export IMAGE_TAG=${COMMIT_HASH:=latest}
+        echo "Repository URI: $REPOSITORY_URI"
+        echo "Image tag: $IMAGE_TAG"
+
+  build:
+    commands:
+      - echo "Build phase started on `date`"
+      - echo "Building Docker image..."
+      - |
+        # Memory Configuration Note:
+        # The application uses Java with fixed heap sizes: -Xms768m -Xmx768m
+        # Container should have at least 2GB memory to accommodate:
+        # - JVM heap: 768MB
+        # - JVM non-heap (metaspace, code cache, etc): ~512MB
+        # - Python application: ~256MB
+        # - KCL processing overhead: ~256MB
+        # - System overhead: ~256MB
+        # Current ECS task allocation of 2GB provides good headroom.
+        # The -XX:+UseContainerSupport flag ensures JVM respects container limits.
+
+        # Detect target architecture dynamically if not set
+        if [ -z "${TARGET_ARCHITECTURE}" ]; then
+          ARCH=$(uname -m)
+          case ${ARCH} in
+            x86_64)
+              TARGET_ARCHITECTURE="linux/amd64"
+              ;;
+            aarch64|arm64)
+              TARGET_ARCHITECTURE="linux/arm64"
+              ;;
+            *)
+              echo "Unsupported architecture: ${ARCH}. Defaulting to linux/arm64"
+              TARGET_ARCHITECTURE="linux/arm64"
+              ;;
+          esac
+        fi
+
+        echo "Building for target architecture: ${TARGET_ARCHITECTURE}"
+
+        # Try to pull latest image for cache
+        docker pull "${IMAGE_URI}:latest" || true
+        DOCKER_BUILDKIT=1 docker build \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          --cache-from "${IMAGE_URI}:latest" \
+          --platform "${TARGET_ARCHITECTURE}" \
+          --build-arg PGSQL_CREDENTIALS_SECRET_NAME="${PGSQL_CREDENTIALS_SECRET_NAME}" \
+          --build-arg REDIS_CREDENTIALS_SECRET_NAME="${REDIS_CREDENTIALS_SECRET_NAME}" \
+          --build-arg AWS_REGION="${AWS_DEFAULT_REGION}" \
+          -t "${IMAGE_REPO_NAME}:${IMAGE_TAG}" \
+          -t "${IMAGE_REPO_NAME}:latest" \
+          .
+      - docker tag "${IMAGE_REPO_NAME}:latest" "${IMAGE_URI}:latest"
+      - docker tag "${IMAGE_REPO_NAME}:${IMAGE_TAG}" "${IMAGE_URI}:${IMAGE_TAG}"
+
+  post_build:
+    commands:
+      - echo "Post-build phase started on `date`"
+      - echo "Pushing Docker images..."
+      - docker push "${IMAGE_URI}:latest"
+      - docker push "${IMAGE_URI}:${IMAGE_TAG}"
+      - echo "Validating required environment variables..."
+      - |
+        VALIDATION_FAILED=false
+
+        if [ -z "${ECS_CLUSTER_NAME}" ]; then
+          echo "ERROR: ECS_CLUSTER_NAME environment variable is required"
+          VALIDATION_FAILED=true
+        fi
+
+        if [ -z "${IMAGE_URI}" ]; then
+          echo "ERROR: IMAGE_URI environment variable is required"
+          VALIDATION_FAILED=true
+        fi
+
+        if [ -z "${IMAGE_REPO_NAME}" ]; then
+          echo "ERROR: IMAGE_REPO_NAME environment variable is required"
+          VALIDATION_FAILED=true
+        fi
+
+        if [ "${VALIDATION_FAILED}" = "true" ]; then
+          echo "Environment validation failed. Exiting."
+          exit 1
+        fi
+
+        echo "All required environment variables validated successfully"
+
+      - echo "Preserving current task definitions for rollback..."
+      - |
+        REALTIME_CURRENT_TASK_DEF=$(aws ecs describe-services --cluster "${ECS_CLUSTER_NAME}" --services tx-asset-cycle-realtime --query 'services[0].taskDefinition' --output text 2>/dev/null || echo "none")
+        REPROCESS_CURRENT_TASK_DEF=$(aws ecs describe-services --cluster "${ECS_CLUSTER_NAME}" --services tx-asset-cycle-reprocess --query 'services[0].taskDefinition' --output text 2>/dev/null || echo "none")
+
+        echo "Current realtime task definition: ${REALTIME_CURRENT_TASK_DEF}"
+        echo "Current reprocess task definition: ${REPROCESS_CURRENT_TASK_DEF}"
+
+        # Store for build metadata
+        echo "REALTIME_CURRENT_TASK_DEF=${REALTIME_CURRENT_TASK_DEF}" >> build.env
+        echo "REPROCESS_CURRENT_TASK_DEF=${REPROCESS_CURRENT_TASK_DEF}" >> build.env
+
+      - echo "Fetching and updating task definitions..."
+      - |
+        update_task_definition() {
+          local SERVICE_NAME=$1
+          local CURRENT_TASK_DEF=$2
+          local OUTPUT_FILE=$3
+
+          if [ "${CURRENT_TASK_DEF}" != "none" ]; then
+            aws ecs describe-task-definition --task-definition "${CURRENT_TASK_DEF}" --query 'taskDefinition' | \
+            jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' > "current-${SERVICE_NAME}-taskdef.json"
+
+            echo "Updating ${SERVICE_NAME} container image to ${IMAGE_URI}:${IMAGE_TAG}"
+            cp "current-${SERVICE_NAME}-taskdef.json" "${SERVICE_NAME}-taskdef.tmp"
+            jq --arg IMAGE "${IMAGE_URI}:${IMAGE_TAG}" \
+              '.containerDefinitions = [.containerDefinitions[] | if .name == "'"${SERVICE_NAME}"'" then .image = $IMAGE else . end]' \
+              "${SERVICE_NAME}-taskdef.tmp" > "${OUTPUT_FILE}"
+
+            cp "${OUTPUT_FILE}" "${SERVICE_NAME}-taskdef.tmp"
+            jq --arg IMAGE "${SIGNOZ_COLLECTOR_IMAGE}" \
+              '.containerDefinitions = [.containerDefinitions[] | if .name == "signoz-collector" then .image = $IMAGE else . end]' \
+              "${SERVICE_NAME}-taskdef.tmp" > "${OUTPUT_FILE}"
+
+            rm -f "${SERVICE_NAME}-taskdef.tmp" "current-${SERVICE_NAME}-taskdef.json"
+
+            # Show what we're about to register
+            echo "Task definition for ${SERVICE_NAME}:"
+            jq '.containerDefinitions[] | {name: .name, image: .image}' "${OUTPUT_FILE}"
+          else
+            echo "No existing task definition found for ${SERVICE_NAME} - this appears to be initial deployment"
+          fi
+        }
+
+        update_task_definition "tx-asset-cycle-realtime" "${REALTIME_CURRENT_TASK_DEF}" "taskdef-realtime.json"
+        update_task_definition "tx-asset-cycle-reprocess" "${REPROCESS_CURRENT_TASK_DEF}" "taskdef-reprocess.json"
+
+      - echo "Registering new task definitions..."
+      - |
+        if [ -f "taskdef-realtime.json" ] && [ "${REALTIME_CURRENT_TASK_DEF}" != "none" ]; then
+          echo "Registering new task definition for realtime service..."
+          REALTIME_NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://taskdef-realtime.json --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "New realtime task definition registered: ${REALTIME_NEW_TASK_DEF_ARN}"
+          echo "REALTIME_NEW_TASK_DEF_ARN=${REALTIME_NEW_TASK_DEF_ARN}" >> build.env
+        fi
+
+        if [ -f "taskdef-reprocess.json" ] && [ "${REPROCESS_CURRENT_TASK_DEF}" != "none" ]; then
+          echo "Registering new task definition for reprocess service..."
+          REPROCESS_NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://taskdef-reprocess.json --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "New reprocess task definition registered: ${REPROCESS_NEW_TASK_DEF_ARN}"
+          echo "REPROCESS_NEW_TASK_DEF_ARN=${REPROCESS_NEW_TASK_DEF_ARN}" >> build.env
+        fi
+
+      - echo "Starting atomic deployment of both services..."
+      - |
+        DEPLOYMENT_SUCCESS=true
+
+        # Update realtime service
+        if [ -n "${REALTIME_NEW_TASK_DEF_ARN}" ]; then
+          echo "Updating realtime service with new task definition..."
+          if ! aws ecs update-service --cluster "${ECS_CLUSTER_NAME}" --service tx-asset-cycle-realtime --task-definition "${REALTIME_NEW_TASK_DEF_ARN}" | jq '.service.events = .service.events[:3]'; then
+            echo "ERROR: Failed to update realtime service"
+            DEPLOYMENT_SUCCESS=false
+          fi
+        else
+          echo "Using force deployment for realtime service..."
+          if ! aws ecs update-service --cluster "${ECS_CLUSTER_NAME}" --service tx-asset-cycle-realtime --force-new-deployment | jq '.service.events = .service.events[:3]'; then
+            echo "ERROR: Failed to force update realtime service"
+            DEPLOYMENT_SUCCESS=false
+          fi
+        fi
+
+        # Update reprocess service
+        if [ -n "${REPROCESS_NEW_TASK_DEF_ARN}" ]; then
+          echo "Updating reprocess service with new task definition..."
+          if ! aws ecs update-service --cluster "${ECS_CLUSTER_NAME}" --service tx-asset-cycle-reprocess --task-definition "${REPROCESS_NEW_TASK_DEF_ARN}" | jq '.service.events = .service.events[:3]'; then
+            echo "ERROR: Failed to update reprocess service"
+            DEPLOYMENT_SUCCESS=false
+          fi
+        else
+          echo "Using force deployment for reprocess service..."
+          if ! aws ecs update-service --cluster "${ECS_CLUSTER_NAME}" --service tx-asset-cycle-reprocess --force-new-deployment | jq '.service.events = .service.events[:3]'; then
+            echo "ERROR: Failed to force update reprocess service"
+            DEPLOYMENT_SUCCESS=false
+          fi
+        fi
+
+        if [ "${DEPLOYMENT_SUCCESS}" = "false" ]; then
+          echo "CRITICAL: Service updates failed. Manual intervention may be required."
+          exit 1
+        fi
+
+      - echo "Waiting for services to stabilize..."
+      - |
+        echo "Waiting for realtime service to stabilize..."
+        if ! aws ecs wait services-stable --cluster "${ECS_CLUSTER_NAME}" --services tx-asset-cycle-realtime; then
+          echo "WARNING: Realtime service did not stabilize within timeout"
+        else
+          echo "Realtime service stabilized successfully"
+        fi
+
+        echo "Waiting for reprocess service to stabilize..."
+        if ! aws ecs wait services-stable --cluster "${ECS_CLUSTER_NAME}" --services tx-asset-cycle-reprocess; then
+          echo "WARNING: Reprocess service did not stabilize within timeout"
+        else
+          echo "Reprocess service stabilized successfully"
+        fi
+
+      - echo "Verifying deployment success..."
+      - |
+        REALTIME_RUNNING=$(aws ecs describe-services --cluster "${ECS_CLUSTER_NAME}" --services tx-asset-cycle-realtime --query 'services[0].deployments[?status==`PRIMARY`].runningCount' --output text)
+        REPROCESS_RUNNING=$(aws ecs describe-services --cluster "${ECS_CLUSTER_NAME}" --services tx-asset-cycle-reprocess --query 'services[0].deployments[?status==`PRIMARY`].runningCount' --output text)
+
+        echo "Realtime service running tasks: ${REALTIME_RUNNING}"
+        echo "Reprocess service running tasks: ${REPROCESS_RUNNING}"
+
+        echo "REALTIME_RUNNING_TASKS=${REALTIME_RUNNING}" >> build.env
+        echo "REPROCESS_RUNNING_TASKS=${REPROCESS_RUNNING}" >> build.env
+
+      - echo "Creating imagedefinitions.json for CodePipeline..."
+      - |
+        cat > imagedefinitions.json <<EOF
+        [
+          {
+            "name": "tx-asset-cycle-realtime",
+            "imageUri": "${IMAGE_URI}:${IMAGE_TAG}"
+          },
+          {
+            "name": "tx-asset-cycle-reprocess",
+            "imageUri": "${IMAGE_URI}:${IMAGE_TAG}"
+          }
+        ]
+        EOF
+
+      - echo "Generating rollback instructions..."
+      - |
+        cat > rollback-instructions.txt <<EOF
+        ===== ROLLBACK INSTRUCTIONS =====
+
+        If deployment issues occur, use these commands to rollback:
+
+        Rollback Realtime Service:
+        aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service tx-asset-cycle-realtime --task-definition ${REALTIME_CURRENT_TASK_DEF}
+
+        Rollback Reprocess Service:
+        aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service tx-asset-cycle-reprocess --task-definition ${REPROCESS_CURRENT_TASK_DEF}
+
+        Wait for rollback to complete:
+        aws ecs wait services-stable --cluster ${ECS_CLUSTER_NAME} --services tx-asset-cycle-realtime tx-asset-cycle-reprocess
+
+        Build Information:
+        - Image: ${IMAGE_URI}:${IMAGE_TAG}
+        - Commit: ${COMMIT_HASH}
+        - Build Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+        ==================================
+        EOF
+
+        echo "Rollback instructions generated"
+        cat rollback-instructions.txt
+
+      - echo "BUILD_COMMIT_HASH=${COMMIT_HASH}" >> build.env
+      - echo "BUILD_IMAGE_TAG=${IMAGE_TAG}" >> build.env
+      - echo "BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> build.env
+      - echo "BUILD_SUCCESS=true" >> build.env
+      - echo "Build completed successfully on `date`"
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - taskdef-realtime.json
+    - taskdef-reprocess.json
+    - build.env
+    - rollback-instructions.txt
+  name: tx-asset-cycle-BuildArtifacts
+
+cache:
+  paths:
+    - "/var/lib/docker/**/*"
+    - "/root/.docker/**/*"
